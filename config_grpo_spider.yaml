@@ -1,0 +1,62 @@
+# Configuration for RL Text-to-SQL Training
+# Based on SQL-R1 GRPO approach
+
+# Model Configuration
+model_name: "codellama/CodeLlama-7b-hf"  # Can also use: Qwen/Qwen2.5-Coder-3B-Instruct
+use_qlora: true
+
+# Data Configuration
+train_data: "data/spider/train_spider.json"
+dev_data: "data/spider/dev.json"
+db_root: "data/spider/database"
+
+# GRPO Configuration
+num_samples: 4  # Number of samples per prompt (K in paper)
+temperature: 0.7
+top_p: 0.9
+max_new_tokens: 256
+
+# Reward Configuration
+execution_weight: 1.0
+partial_weight: 0.3
+timeout_seconds: 5
+use_partial_rewards: true
+
+# Training Configuration
+num_epochs: 3
+batch_size: 1  # Keep at 1 for 24GB GPU
+gradient_accumulation_steps: 8  # Effective batch size = 8
+learning_rate: 1e-5
+max_grad_norm: 1.0
+warmup_steps: 100
+
+# RL Hyperparameters
+kl_coef: 0.1  # KL penalty coefficient (β)
+clip_range: 0.2  # PPO-style clipping
+advantage_normalization: true
+
+# LoRA Configuration (if using PEFT)
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target_modules:
+  - q_proj
+  - v_proj
+  - k_proj
+  - o_proj
+
+# Logging & Checkpointing
+output_dir: "outputs/rl-text2sql"
+log_interval: 10
+eval_interval: 100
+save_steps: 500
+
+# System
+seed: 42
+device: "cuda"
+
+# Notes:
+# - For 24GB GPU, keep batch_size=1 with gradient accumulation
+# - Reduce num_samples to 2-3 if OOM
+# - Reduce max_new_tokens to 128 if OOM
+# - Use gradient_checkpointing (enabled by default in code)
