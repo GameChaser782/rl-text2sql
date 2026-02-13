@@ -153,12 +153,11 @@ SQL:"""
         }
         
         # Save predictions
+        import os
         if output_file:
+            os.makedirs(os.path.dirname(output_file), exist_ok=True)
             with open(output_file, 'w') as f:
-                json.dump({
-                    'metrics': metrics,
-                    'predictions': predictions
-                }, f, indent=2)
+                json.dump({'metrics': metrics, 'predictions': predictions}, f, indent=2)
         
         return metrics
 
@@ -171,7 +170,7 @@ def load_model(model_path: str, base_model: str = None):
         model_path: Path to saved model (LoRA adapters or full model)
         base_model: Base model name (required if loading LoRA adapters)
     """
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(args.base_model)
     
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -181,8 +180,8 @@ def load_model(model_path: str, base_model: str = None):
         if base_model:
             # Load base model
             base = AutoModelForCausalLM.from_pretrained(
-                base_model,
-                device_map="auto",
+                args.base_model, 
+                device_map={"": 0},  # Force single GPU
                 torch_dtype=torch.bfloat16
             )
             # Load LoRA adapters

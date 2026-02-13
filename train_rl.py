@@ -89,7 +89,7 @@ def load_model_and_tokenizer(model_name: str, use_qlora: bool = True):
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
             quantization_config=bnb_config,
-            device_map="auto",
+            device_map={"": 0},  # Changed from "auto" to force GPU 0
             trust_remote_code=True
         )
         
@@ -242,7 +242,7 @@ if __name__ == "__main__":
     parser.add_argument('--config', type=str, help='Path to config YAML file')
     
     # Model
-    parser.add_argument('--model_name', type=str, default='codellama/CodeLlama-7b-hf',
+    parser.add_argument('--model_name', type=str, default=None,  # Changed from 'codellama/CodeLlama-7b-hf'
                        help='HuggingFace model name')
     parser.add_argument('--use_qlora', action='store_true', default=True,
                        help='Use QLoRA quantization')
