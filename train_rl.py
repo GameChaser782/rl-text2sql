@@ -69,15 +69,11 @@ def load_model_and_tokenizer(model_name: str, use_qlora: bool = True):
     Returns:
         model, tokenizer
     """
-    # Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    
-    # Set pad token if not set
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     
     if use_qlora:
-        # QLoRA configuration for 4-bit quantization
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_use_double_quant=True,
@@ -85,11 +81,10 @@ def load_model_and_tokenizer(model_name: str, use_qlora: bool = True):
             bnb_4bit_compute_dtype=torch.bfloat16
         )
         
-        # Load base model with quantization
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
             quantization_config=bnb_config,
-            device_map={"": 0},  # Changed from "auto" to force GPU 0
+            device_map="auto",  # CHANGE: from {"": 0} to "auto"
             trust_remote_code=True
         )
         
