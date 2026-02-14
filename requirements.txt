@@ -34,7 +34,6 @@ tensorboard>=2.13.0  # For logging (optional)
 
 # Optimization (Optional)
 unsloth  # For faster training (linux only usually, but good to list)
-vllm     # For faster inference
 
 # Development
 jupyter>=1.0.0

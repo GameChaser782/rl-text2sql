@@ -19,17 +19,13 @@ from reward import SQLRewardCalculator, RewardConfig
 class Text2SQLEvaluator:
     """Evaluator for Text-to-SQL models."""
     
-    def __init__(self, model, tokenizer, reward_calculator, device="cuda", use_vllm=False, sampling_params=None, lora_request=None):
+    def __init__(self, model, tokenizer, reward_calculator, device="cuda"):
         self.model = model
         self.tokenizer = tokenizer
         self.reward_calculator = reward_calculator
         self.device = device
-        self.use_vllm = use_vllm
-        self.sampling_params = sampling_params
-        self.lora_request = lora_request
         
-        if not self.use_vllm:
-            self.model.eval()
+        self.model.eval()
     
     def create_prompt(self, question: str, schema: str = None) -> str:
         if schema:
@@ -47,27 +43,16 @@ SQL:"""
     def generate_sql(self, question: str, schema: str = None) -> str:
         prompt = self.create_prompt(question, schema)
         
-        if self.use_vllm:
-            # vLLM generation
+        inputs = self.tokenizer(prompt, return_tensors="pt", padding=True, truncation=True).to(self.device)
+        with torch.no_grad():
             outputs = self.model.generate(
-                [prompt], 
-                self.sampling_params, 
-                use_tqdm=False,
-                lora_request=self.lora_request
+                **inputs, 
+                max_new_tokens=512, 
+                temperature=0.0,  # Greedy decoding for eval
+                do_sample=False, 
+                pad_token_id=self.tokenizer.pad_token_id
             )
-            generated_text = outputs[0].outputs[0].text
-        else:
-            # Standard HF generation
-            inputs = self.tokenizer(prompt, return_tensors="pt", padding=True, truncation=True).to(self.device)
-            with torch.no_grad():
-                outputs = self.model.generate(
-                    **inputs, 
-                    max_new_tokens=512, 
-                    temperature=0.0,  # Greedy decoding for eval
-                    do_sample=False, 
-                    pad_token_id=self.tokenizer.pad_token_id
-                )
-            generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
             
         sql = self.extract_sql(generated_text)
         return sql
@@ -154,83 +139,40 @@ def main(args):
     reward_config = RewardConfig(execution_weight=1.0, partial_weight=0.0, timeout_seconds=5, use_partial_rewards=False)
     reward_calculator = SQLRewardCalculator(db_path="", config=reward_config)
     
-    evaluator = None
+    print(f"\nLoading model from {args.model_path} (Standard HF)...")
     
-    if args.use_vllm:
-        print("\nUsing vLLM for inference...")
-        try:
-            from vllm import LLM, SamplingParams
-            from vllm.lora.request import LoRARequest
-        except ImportError:
-            raise ImportError("vLLM is not installed. Please install it with `pip install vllm`.")
-        
-        # Determine if we need to load LoRA
-        enable_lora = False
-        lora_request = None
-        
-        if args.model_path != args.base_model:
-            enable_lora = True
-            print(f"Enabling LoRA support for {args.model_path}")
-            # Ensure path is absolute
-            lora_path = os.path.abspath(args.model_path)
-            lora_request = LoRARequest("adapter", 1, lora_path)
-        
-        # Initialize vLLM
-        model = LLM(
-            model=args.base_model,
-            tensor_parallel_size=args.num_gpus,
-            enable_lora=enable_lora,
-            trust_remote_code=True,
-            gpu_memory_utilization=0.9
-        )
-        
-        # Sampling params for greedy decoding
-        sampling_params = SamplingParams(temperature=0.0, max_tokens=512)
-        
-        evaluator = Text2SQLEvaluator(
-            model=model, 
-            tokenizer=None, 
-            reward_calculator=reward_calculator, 
-            use_vllm=True,
-            sampling_params=sampling_params,
-            lora_request=lora_request
-        )
-        
+    tokenizer = AutoTokenizer.from_pretrained(args.base_model)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    
+    # Determine device map
+    if args.num_gpus == 1:
+        device_map = {"": 0}
     else:
-        print(f"\nLoading model from {args.model_path} (Standard HF)...")
-        
-        tokenizer = AutoTokenizer.from_pretrained(args.base_model)
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-        
-        # Determine device map
-        if args.num_gpus == 1:
-            device_map = {"": 0}
-        else:
-            device_map = "auto"
-        
-        # Load base model
-        model = AutoModelForCausalLM.from_pretrained(
-            args.base_model, 
-            device_map=device_map,
-            dtype=torch.bfloat16,
-            trust_remote_code=True
-        )
-        
-        # Load PEFT adapter
-        if args.model_path != args.base_model:
-            print(f"Loading PEFT adapter from {args.model_path}")
-            model = PeftModel.from_pretrained(model, args.model_path)
-        else:
-            print("Evaluating base model (no PEFT adapter loaded)")
-            
-        evaluator = Text2SQLEvaluator(
-            model=model, 
-            tokenizer=tokenizer, 
-            reward_calculator=reward_calculator, 
-            device="cuda" if torch.cuda.is_available() else "cpu"
-        )
+        device_map = "auto"
     
+    # Load base model
+    model = AutoModelForCausalLM.from_pretrained(
+        args.base_model, 
+        device_map=device_map,
+        dtype=torch.bfloat16,
+        trust_remote_code=True
+    )
+    
+    # Load PEFT adapter
+    if args.model_path != args.base_model:
+        print(f"Loading PEFT adapter from {args.model_path}")
+        model = PeftModel.from_pretrained(model, args.model_path)
+    else:
+        print("Evaluating base model (no PEFT adapter loaded)")
+        
+    evaluator = Text2SQLEvaluator(
+        model=model, 
+        tokenizer=tokenizer, 
+        reward_calculator=reward_calculator, 
+        device="cuda" if torch.cuda.is_available() else "cpu"
+    )
+
     print("\nEvaluating...")
     metrics = evaluator.evaluate(
         test_data=test_data, 
@@ -261,6 +203,5 @@ if __name__ == "__main__":
     parser.add_argument('--db_root', type=str, required=True, help="Database root directory")
     parser.add_argument('--output_file', type=str, help="Output file for results")
     parser.add_argument('--num_gpus', type=int, default=1, help="Number of GPUs to use")
-    parser.add_argument('--use_vllm', action='store_true', help="Use vLLM for faster inference")
     args = parser.parse_args()
     main(args)
