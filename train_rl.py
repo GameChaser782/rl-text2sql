@@ -96,6 +96,7 @@ def main(args):
         gradient_accumulation_steps=config_dict.get('gradient_accumulation_steps', 8),
         kl_coef=config_dict.get('kl_coef', 0.1),
         max_grad_norm=config_dict.get('max_grad_norm', 1.0),
+        max_new_tokens=config_dict.get('max_new_tokens', 512),
         num_gpus=config_dict.get('num_gpus', 1)  # Pass num_gpus to config if needed, or directly to Trainer
     )
     

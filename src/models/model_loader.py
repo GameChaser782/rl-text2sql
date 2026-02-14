@@ -1,5 +1,12 @@
 import os
 import torch
+# Unsloth must be imported before transformers/peft for optimization patching
+try:
+    from unsloth import FastLanguageModel
+    HAS_UNSLOTH = True
+except ImportError:
+    HAS_UNSLOTH = False
+
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
@@ -26,13 +33,11 @@ def load_model(model_name: str, use_qlora: bool = True, use_unsloth: bool = Fals
     print(f"Loading model {model_name} with use_unsloth={use_unsloth}, use_qlora={use_qlora}, num_gpus={num_gpus}")
     
     if use_unsloth:
+        if not HAS_UNSLOTH:
+             raise ImportError("Unsloth is not installed. Please install it or set use_unsloth=False.")
+
         # Set environment variable for Unsloth
         os.environ['UNSLOTH_RETURN_LOGITS'] = '1'
-        
-        try:
-            from unsloth import FastLanguageModel
-        except ImportError:
-            raise ImportError("Unsloth is not installed. Please install it or set use_unsloth=False.")
             
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name = model_name,

@@ -24,10 +24,10 @@ logger = logging.getLogger(__name__)
 class GRPOConfig:
     """Configuration for GRPO training."""
     # Sampling
-    num_samples_per_prompt: int = 4  # K in the paper
-    temperature: float = 0.7
+    num_samples_per_prompt: int = 2  # K in the paper
+    temperature: float = 0.8
     top_p: float = 0.9
-    max_new_tokens: int = 256
+    max_new_tokens: int = 512
     
     # Training
     learning_rate: float = 1e-5
