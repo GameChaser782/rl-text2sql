@@ -131,14 +131,26 @@ def main(args):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     
-    # Load with auto device_map (uses both GPUs)
-    base = AutoModelForCausalLM.from_pretrained(
+    # Determine device map
+    if args.num_gpus == 1:
+        device_map = {"": 0}
+    else:
+        device_map = "auto"
+    
+    # Load base model
+    model = AutoModelForCausalLM.from_pretrained(
         args.base_model, 
-        device_map="auto",
+        device_map=device_map,
         torch_dtype=torch.bfloat16
     )
     
-    model = PeftModel.from_pretrained(base, args.model_path)
+    # Load PEFT adapter only if model_path is different from base_model
+    # and implies we are loading an adapter (e.g. not just verifying the base model)
+    if args.model_path != args.base_model:
+        print(f"Loading PEFT adapter from {args.model_path}")
+        model = PeftModel.from_pretrained(model, args.model_path)
+    else:
+        print("Evaluating base model (no PEFT adapter loaded)")
     
     reward_config = RewardConfig(execution_weight=1.0, partial_weight=0.0, timeout_seconds=5, use_partial_rewards=False)
     reward_calculator = SQLRewardCalculator(db_path="", config=reward_config)
@@ -165,10 +177,11 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate Text-to-SQL model")
-    parser.add_argument('--model_path', type=str, required=True)
-    parser.add_argument('--base_model', type=str, required=True)
-    parser.add_argument('--test_data', type=str, required=True)
-    parser.add_argument('--db_root', type=str, required=True)
-    parser.add_argument('--output_file', type=str)
+    parser.add_argument('--model_path', type=str, required=True, help="Path to model or adapter")
+    parser.add_argument('--base_model', type=str, required=True, help="Base model name/path")
+    parser.add_argument('--test_data', type=str, required=True, help="Path to test data JSON")
+    parser.add_argument('--db_root', type=str, required=True, help="Database root directory")
+    parser.add_argument('--output_file', type=str, help="Output file for results")
+    parser.add_argument('--num_gpus', type=int, default=1, help="Number of GPUs to use")
     args = parser.parse_args()
     main(args)

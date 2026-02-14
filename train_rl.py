@@ -8,117 +8,12 @@ import torch
 import argparse
 import yaml
 from pathlib import Path
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-from torch.utils.data import DataLoader, Dataset
-import json
+from torch.utils.data import DataLoader
 
 from reward import SQLRewardCalculator, RewardConfig
 from grpo_trainer import GRPOTrainer, GRPOConfig
-
-
-class SpiderDataset(Dataset):
-    """Spider dataset for Text-to-SQL."""
-    
-    def __init__(self, data_path: str, db_root: str):
-        """
-        Initialize Spider dataset.
-        
-        Args:
-            data_path: Path to spider data JSON file
-            db_root: Root directory containing database folders
-        """
-        with open(data_path, 'r') as f:
-            self.data = json.load(f)
-        
-        self.db_root = db_root
-    
-    def __len__(self):
-        return len(self.data)
-    
-    def __getitem__(self, idx):
-        item = self.data[idx]
-        
-        return {
-            'question': item['question'],
-            'sql': item['query'],
-            'db_id': item['db_id'],
-            'db_path': os.path.join(self.db_root, item['db_id'], f"{item['db_id']}.sqlite"),
-            'schema': item.get('schema', None)  # Optional
-        }
-
-
-def collate_fn(batch):
-    """Custom collate function for DataLoader."""
-    return {
-        'question': [item['question'] for item in batch],
-        'sql': [item['sql'] for item in batch],
-        'db_path': [item['db_path'] for item in batch],
-        'schema': [item.get('schema') for item in batch]
-    }
-
-
-def load_model_and_tokenizer(model_name: str, use_qlora: bool = True):
-    """
-    Load model with QLoRA configuration.
-    
-    Args:
-        model_name: HuggingFace model name
-        use_qlora: Whether to use QLoRA quantization
-        
-    Returns:
-        model, tokenizer
-    """
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    
-    if use_qlora:
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16
-        )
-        
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            quantization_config=bnb_config,
-            device_map="auto",  # CHANGE: from {"": 0} to "auto"
-            trust_remote_code=True
-        )
-        
-        # Prepare for k-bit training
-        model = prepare_model_for_kbit_training(model)
-        
-        # LoRA configuration
-        lora_config = LoraConfig(
-            r=16,
-            lora_alpha=32,
-            target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
-            lora_dropout=0.05,
-            bias="none",
-            task_type="CAUSAL_LM"
-        )
-        
-        # Add LoRA adapters
-        model = get_peft_model(model, lora_config)
-        
-        print(f"LoRA trainable parameters: {model.print_trainable_parameters()}")
-    
-    else:
-        # Load model normally (requires more memory)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            device_map="auto",
-            torch_dtype=torch.bfloat16,
-            trust_remote_code=True
-        )
-    
-    # Enable gradient checkpointing to save memory
-    model.gradient_checkpointing_enable()
-    
-    return model, tokenizer
+from src.data.spider_dataset import SpiderDataset, collate_fn
+from src.models.model_loader import load_model
 
 
 def main(args):
@@ -147,9 +42,15 @@ def main(args):
     
     # Load model and tokenizer
     print("\nLoading model...")
-    model, tokenizer = load_model_and_tokenizer(
+    # Add unsloth environment variable here if needed, but it's handled inside load_model
+    if config_dict.get('use_unsloth', False):
+         os.environ['UNSLOTH_RETURN_LOGITS'] = '1'
+
+    model, tokenizer = load_model(
         config_dict['model_name'],
-        use_qlora=config_dict.get('use_qlora', True)
+        use_qlora=config_dict.get('use_qlora', True),
+        use_unsloth=config_dict.get('use_unsloth', False),
+        num_gpus=config_dict.get('num_gpus', 1)
     )
     
     # Load dataset
@@ -194,7 +95,8 @@ def main(args):
         batch_size=config_dict.get('batch_size', 1),
         gradient_accumulation_steps=config_dict.get('gradient_accumulation_steps', 8),
         kl_coef=config_dict.get('kl_coef', 0.1),
-        max_grad_norm=config_dict.get('max_grad_norm', 1.0)
+        max_grad_norm=config_dict.get('max_grad_norm', 1.0),
+        num_gpus=config_dict.get('num_gpus', 1)  # Pass num_gpus to config if needed, or directly to Trainer
     )
     
     trainer = GRPOTrainer(
@@ -202,7 +104,8 @@ def main(args):
         tokenizer=tokenizer,
         reward_calculator=reward_calculator,
         config=grpo_config,
-        device="cuda" if torch.cuda.is_available() else "cpu"
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        num_gpus=config_dict.get('num_gpus', 1)
     )
     
     # Train
@@ -237,10 +140,14 @@ if __name__ == "__main__":
     parser.add_argument('--config', type=str, help='Path to config YAML file')
     
     # Model
-    parser.add_argument('--model_name', type=str, default=None,  # Changed from 'codellama/CodeLlama-7b-hf'
+    parser.add_argument('--model_name', type=str, default=None,
                        help='HuggingFace model name')
-    parser.add_argument('--use_qlora', action='store_true', default=True,
+    parser.add_argument('--use_qlora', action='store_true', default=None,
                        help='Use QLoRA quantization')
+    parser.add_argument('--use_unsloth', action='store_true', default=False,
+                       help='Use Unsloth optimization')
+    parser.add_argument('--num_gpus', type=int, default=1,
+                       help='Number of GPUs to use (1 or 2)')
     
     # Data
     parser.add_argument('--train_data', type=str, required=True,

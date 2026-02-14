@@ -32,6 +32,10 @@ scikit-learn>=1.3.0
 wandb>=0.15.0  # For experiment tracking (optional)
 tensorboard>=2.13.0  # For logging (optional)
 
+# Optimization (Optional)
+unsloth  # For faster training (linux only usually, but good to list)
+vllm     # For faster inference
+
 # Development
 jupyter>=1.0.0
 notebook>=7.0.0

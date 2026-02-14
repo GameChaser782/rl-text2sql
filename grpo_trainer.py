@@ -47,6 +47,9 @@ class GRPOConfig:
     # Logging
     log_interval: int = 10
     eval_interval: int = 100
+    
+    # Hardware
+    num_gpus: int = 1
 
 
 class GRPOTrainer:
@@ -58,7 +61,8 @@ class GRPOTrainer:
         tokenizer: AutoTokenizer,
         reward_calculator: SQLRewardCalculator,
         config: GRPOConfig,
-        device: str = "cuda"
+        device: str = "cuda",
+        num_gpus: int = 1
     ):
         """
         Initialize GRPO trainer.
@@ -69,12 +73,22 @@ class GRPOTrainer:
             reward_calculator: Reward function
             config: Training configuration
             device: Device to use
+            num_gpus: Number of GPUs
         """
-        self.policy_model = model.to(device)
-        self.tokenizer = tokenizer
-        self.reward_calculator = reward_calculator
         self.config = config
         self.device = device
+        self.num_gpus = num_gpus
+        
+        # Policy model
+        self.policy_model = model
+        # Only move to device if not likely already handled by device_map="auto" or accelerate
+        # If num_gpus > 1 and device_map="auto" used, we shouldn't force to "cuda" (which is cuda:0)
+        # But if num_gpus == 1, ensuring it is on device is fine.
+        if num_gpus == 1:
+            self.policy_model = model.to(device)
+            
+        self.tokenizer = tokenizer
+        self.reward_calculator = reward_calculator
         
         # Create reference model (frozen copy of initial policy)
         self.reference_model = copy.deepcopy(model)
@@ -82,8 +96,9 @@ class GRPOTrainer:
         for param in self.reference_model.parameters():
             param.requires_grad = False
         
-        # Move reference model to CPU to save GPU memory
-        self.reference_model = self.reference_model.to("cpu")
+        # No CPU offloading - keep on GPU(s)
+        # If num_gpus == 1: reference model stays on same GPU.
+        # If num_gpus == 2: reference model stays on GPU(s) where it was initialized.
         
         # Optimizer
         self.optimizer = torch.optim.AdamW(
@@ -240,12 +255,9 @@ SQL:"""
             policy_outputs = self.policy_model(**inputs)
             policy_logits = policy_outputs.logits[:, prompt_length-1:-1, :]
             
-            # Reference logits (move to GPU temporarily)
-            ref_inputs = {k: v.to("cpu") for k, v in inputs.items()}
-            self.reference_model.to(self.device)
+            # Reference logits (no device toggling)
             ref_outputs = self.reference_model(**inputs)
             ref_logits = ref_outputs.logits[:, prompt_length-1:-1, :]
-            self.reference_model.to("cpu")
         
         # KL divergence
         kl = F.kl_div(
