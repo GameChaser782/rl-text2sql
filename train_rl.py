@@ -145,7 +145,7 @@ if __name__ == "__main__":
                        help='HuggingFace model name')
     parser.add_argument('--use_qlora', action='store_true', default=None,
                        help='Use QLoRA quantization')
-    parser.add_argument('--use_unsloth', action='store_true', default=False,
+    parser.add_argument('--use_unsloth', action='store_true', default=None,
                        help='Use Unsloth optimization')
     parser.add_argument('--num_gpus', type=int, default=1,
                        help='Number of GPUs to use (1 or 2)')
@@ -157,17 +157,17 @@ if __name__ == "__main__":
                        help='Root directory of databases')
     
     # Training
-    parser.add_argument('--num_epochs', type=int, default=3)
-    parser.add_argument('--batch_size', type=int, default=1)
-    parser.add_argument('--learning_rate', type=float, default=1e-5)
-    parser.add_argument('--num_samples', type=int, default=4,
+    parser.add_argument('--num_epochs', type=int, default=None)
+    parser.add_argument('--batch_size', type=int, default=None)
+    parser.add_argument('--learning_rate', type=float, default=None)
+    parser.add_argument('--num_samples', type=int, default=None,
                        help='Number of samples per prompt for GRPO')
-    parser.add_argument('--kl_coef', type=float, default=0.1)
+    parser.add_argument('--kl_coef', type=float, default=None)
     
     # Output
-    parser.add_argument('--output_dir', type=str, default='outputs/rl-text2sql',
+    parser.add_argument('--output_dir', type=str, default=None,
                        help='Directory to save model')
-    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--seed', type=int, default=None)
     
     args = parser.parse_args()
     

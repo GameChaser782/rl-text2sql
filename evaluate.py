@@ -141,7 +141,7 @@ def main(args):
     model = AutoModelForCausalLM.from_pretrained(
         args.base_model, 
         device_map=device_map,
-        torch_dtype=torch.bfloat16
+        dtype=torch.bfloat16
     )
     
     # Load PEFT adapter only if model_path is different from base_model

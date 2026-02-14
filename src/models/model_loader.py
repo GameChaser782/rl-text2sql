@@ -109,7 +109,7 @@ def load_model(model_name: str, use_qlora: bool = True, use_unsloth: bool = Fals
             model = AutoModelForCausalLM.from_pretrained(
                 model_name,
                 device_map=device_map,
-                torch_dtype=torch.bfloat16,
+                dtype=torch.bfloat16,
                 trust_remote_code=True
             )
         
