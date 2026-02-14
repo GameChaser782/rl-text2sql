@@ -3,6 +3,7 @@ Main training script for RL Text-to-SQL.
 Integrates model loading, dataset preparation, and GRPO training.
 """
 
+import unsloth
 import os
 import torch
 import argparse

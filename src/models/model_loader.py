@@ -1,11 +1,14 @@
-import os
-import torch
 # Unsloth must be imported before transformers/peft for optimization patching
 try:
+    import unsloth
     from unsloth import FastLanguageModel
     HAS_UNSLOTH = True
-except ImportError:
+except ImportError as e:
     HAS_UNSLOTH = False
+    print(f"WARNING: Unsloth import failed in model_loader: {e}")
+
+import os
+import torch
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
