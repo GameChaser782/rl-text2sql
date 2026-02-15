@@ -5,6 +5,7 @@ Evaluation script for Text-to-SQL models with detailed metrics.
 import argparse
 import json
 import os
+import sqlite3
 from pathlib import Path
 from typing import Dict, List
 
@@ -40,7 +41,38 @@ SQL:"""
             prompt = f"Question: {question}\nSQL:"
         return prompt
 
-    def generate_sql(self, question: str, schema: str = None) -> str:
+    def _get_db_schema(self, db_path: str) -> str:
+        """Return a compact textual schema (table(col, ...); ...) from an SQLite database."""
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = [r[0] for r in cur.fetchall()]
+            parts = []
+            for t in tables:
+                try:
+                    cur.execute(f"PRAGMA table_info('{t}')")
+                    cols = [r[1] for r in cur.fetchall()]
+                    parts.append(f"{t}({', '.join(cols)})")
+                except Exception:
+                    parts.append(t)
+            conn.close()
+            return "; ".join(parts)
+        except Exception:
+            return None
+
+    def generate_sql(
+        self, question: str, schema: str = None, db_path: str = None
+    ) -> str:
+        # If schema not provided, try to extract from db_path
+        if schema is None and db_path is not None:
+            try:
+                extracted = self._get_db_schema(db_path)
+                if extracted:
+                    schema = extracted
+            except Exception:
+                schema = None
+
         prompt = self.create_prompt(question, schema)
 
         inputs = self.tokenizer(
@@ -100,7 +132,8 @@ SQL:"""
             db_path = f"{db_root}/{db_id}/{db_id}.sqlite"
             schema = example.get("schema")
 
-            pred_sql = self.generate_sql(question, schema)
+            # Provide db_path so generate_sql can extract the schema from the DB and improve generation
+            pred_sql = self.generate_sql(question, schema, db_path=db_path)
             reward_dict = self.reward_calculator.compute_reward(
                 pred_sql, gold_sql, question, db_path
             )
