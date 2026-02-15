@@ -88,7 +88,7 @@ def main(args):
     grpo_config = GRPOConfig(
         num_samples_per_prompt=config_dict.get("num_samples", 4),
         temperature=config_dict.get("temperature", 0.7),
-        learning_rate=config_dict.get("learning_rate", 1e-5),
+        learning_rate=float(config_dict.get("learning_rate", 1e-5)),
         num_epochs=config_dict.get("num_epochs", 3),
         batch_size=config_dict.get("batch_size", 1),
         gradient_accumulation_steps=config_dict.get("gradient_accumulation_steps", 8),
