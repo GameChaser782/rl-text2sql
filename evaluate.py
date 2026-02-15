@@ -114,6 +114,22 @@ SQL:"""
             sql = sql[:semicolon_idx]
         return sql.strip()
 
+    def _sanitize_sql(self, text: str) -> str:
+        """Remove markdown fences/backticks and extract first SELECT statement."""
+        if not text:
+            return text
+        s = text.replace("```", " ").replace("`", " ")
+        if "SQL:" in s:
+            s = s.split("SQL:", 1)[1]
+        up = s.upper()
+        idx = up.find("SELECT")
+        if idx != -1:
+            candidate = s[idx:]
+            if ";" in candidate:
+                candidate = candidate.split(";", 1)[0]
+            return candidate.strip()
+        return s.strip()
+
     def evaluate(
         self, test_data: List[Dict], db_root: str, output_file: str = None
     ) -> Dict[str, float]:
@@ -134,6 +150,8 @@ SQL:"""
 
             # Provide db_path so generate_sql can extract the schema from the DB and improve generation
             pred_sql = self.generate_sql(question, schema, db_path=db_path)
+            pred_sql_raw = pred_sql
+            pred_sql = self._sanitize_sql(pred_sql_raw) or pred_sql_raw
             reward_dict = self.reward_calculator.compute_reward(
                 pred_sql, gold_sql, question, db_path
             )
@@ -156,7 +174,8 @@ SQL:"""
                 {
                     "question": question,
                     "gold_sql": gold_sql,
-                    "pred_sql": pred_sql,
+                    "pred_sql": pred_sql,  # sanitized
+                    "pred_sql_raw": pred_sql_raw,
                     "db_id": db_id,
                     "execution_correct": is_correct,
                     "exact_match": pred_sql.strip().upper() == gold_sql.strip().upper(),
