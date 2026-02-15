@@ -32,6 +32,23 @@ def main(args):
         if value is not None and key != "config":
             config_dict[key] = value
 
+    # If running on Kaggle, default the output directory to a persistent path
+    # so that repo clones/updates won't overwrite model artifacts.
+    try:
+        is_kaggle = any(
+            p
+            for p in ["/kaggle", os.environ.get("KAGGLE_URL_BASE")]
+            if p and os.path.exists(p)
+        )
+    except Exception:
+        is_kaggle = False
+
+    if not config_dict.get("output_dir"):
+        if is_kaggle:
+            config_dict["output_dir"] = "/kaggle/working/rl-text2sql-outputs"
+        else:
+            config_dict["output_dir"] = "outputs/rl-text2sql"
+
     print("=" * 80)
     print("RL Text-to-SQL Training")
     print("=" * 80)
