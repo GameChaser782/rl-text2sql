@@ -52,20 +52,11 @@ lora_target_modules:
   - q_proj
   - v_proj
   - k_proj
+  - o_proj
 
 # Output
 output_dir: "outputs/rl-text2sql"
 seed: 42
-
-# Kaggle-specific notes:
-# - Unsloth requires Linux (not Windows) - available on Kaggle
-# - For best results on Kaggle, set use_unsloth=true (3x faster, 60% VRAM savings)
-# - Keep batch_size=1 with gradient_accumulation_steps=8 for memory efficiency
-# - Typical runtime: 2-4 hours per epoch on Kaggle P100/V100
-
-  - o_proj
-
-# Logging & Checkpointing
 output_dir: "outputs/rl-text2sql"
 log_interval: 10
 eval_interval: 100
