@@ -1,14 +1,18 @@
 # Configuration for RL Text-to-SQL Training
 # Based on SQL-R1 GRPO approach
+# Optimized for Kaggle Notebooks with Unsloth support
 
 # Model Configuration
-model_name: "Qwen/Qwen2.5-Coder-3B-Instruct"  # Can also use: Qwen/Qwen2.5-Coder-3B-Instruct
+model_name: "Qwen/Qwen2.5-Coder-3B-Instruct"
 use_qlora: true
-use_unsloth: false
+use_unsloth: false  # Set to true for Kaggle (Linux only, faster training, less VRAM)
 use_vllm_inference: false
 
+# Maximum sequence length (important for unsloth)
+max_seq_length: 2048
+
 # Hardware Configuration
-num_gpus: 1  # 1 or 2
+num_gpus: 1  # Set to 1 for Kaggle (single GPU)
 
 # Data Configuration
 train_data: "data/spider/train_spider.json"
@@ -29,7 +33,7 @@ use_partial_rewards: true
 
 # Training Configuration
 num_epochs: 2
-batch_size: 1  # Keep at 1 for 24GB GPU
+batch_size: 1  # Keep at 1 for 24GB GPU or Kaggle
 gradient_accumulation_steps: 8  # Effective batch size = 8
 learning_rate: 1e-5
 max_grad_norm: 1.0
@@ -48,6 +52,17 @@ lora_target_modules:
   - q_proj
   - v_proj
   - k_proj
+
+# Output
+output_dir: "outputs/rl-text2sql"
+seed: 42
+
+# Kaggle-specific notes:
+# - Unsloth requires Linux (not Windows) - available on Kaggle
+# - For best results on Kaggle, set use_unsloth=true (3x faster, 60% VRAM savings)
+# - Keep batch_size=1 with gradient_accumulation_steps=8 for memory efficiency
+# - Typical runtime: 2-4 hours per epoch on Kaggle P100/V100
+
   - o_proj
 
 # Logging & Checkpointing
