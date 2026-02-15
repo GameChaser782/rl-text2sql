@@ -3,17 +3,19 @@ Reward calculator for Text-to-SQL RL training.
 Implements execution-based and partial rewards.
 """
 
-import sqlite3
-import re
-from typing import Dict, List, Tuple, Optional
-from dataclasses import dataclass
-import timeout_decorator
 import difflib
+import re
+import sqlite3
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+
+import timeout_decorator
 
 
 @dataclass
 class RewardConfig:
     """Configuration for reward calculation."""
+
     execution_weight: float = 1.0
     partial_weight: float = 0.3
     timeout_seconds: int = 5
@@ -34,7 +36,9 @@ class SQLRewardCalculator:
         self.db_path = db_path
         self.config = config or RewardConfig()
 
-    def _execute_sql(self, sql: str, db_path: str) -> Tuple[bool, Optional[List], Optional[str]]:
+    def _execute_sql(
+        self, sql: str, db_path: str
+    ) -> Tuple[bool, Optional[List], Optional[str]]:
         """
         Execute SQL query with timeout and error handling.
 
@@ -42,6 +46,7 @@ class SQLRewardCalculator:
             (success, results, error_message)
         """
         try:
+
             @timeout_decorator.timeout(self.config.timeout_seconds)
             def _run_query():
                 conn = sqlite3.connect(db_path)
@@ -70,8 +75,9 @@ class SQLRewardCalculator:
         normalized = set()
         for row in results:
             # Convert all values to strings and lowercase for comparison
-            normalized_row = tuple(str(val).lower() if val is not None else "null"
-                                  for val in row)
+            normalized_row = tuple(
+                str(val).lower() if val is not None else "null" for val in row
+            )
             normalized.add(normalized_row)
         return normalized
 
@@ -106,33 +112,49 @@ class SQLRewardCalculator:
         sql = sql.upper()
 
         components = {
-            'select': set(),
-            'from': set(),
-            'where': set(),
-            'group_by': set(),
-            'order_by': set(),
-            'keywords': set()
+            "select": set(),
+            "from": set(),
+            "where": set(),
+            "group_by": set(),
+            "order_by": set(),
+            "keywords": set(),
         }
 
         # Extract SELECT columns
-        select_match = re.search(r'SELECT\s+(.*?)\s+FROM', sql, re.DOTALL)
+        select_match = re.search(r"SELECT\s+(.*?)\s+FROM", sql, re.DOTALL)
         if select_match:
-            components['select'] = set(select_match.group(1).split(','))
+            components["select"] = set(select_match.group(1).split(","))
 
         # Extract FROM tables
-        from_match = re.search(r'FROM\s+(.*?)(?:\s+WHERE|\s+GROUP|\s+ORDER|\s+LIMIT|$)', sql)
+        from_match = re.search(
+            r"FROM\s+(.*?)(?:\s+WHERE|\s+GROUP|\s+ORDER|\s+LIMIT|$)", sql
+        )
         if from_match:
-            components['from'] = set(from_match.group(1).split(','))
+            components["from"] = set(from_match.group(1).split(","))
 
         # Extract WHERE conditions
-        where_match = re.search(r'WHERE\s+(.*?)(?:\s+GROUP|\s+ORDER|\s+LIMIT|$)', sql)
+        where_match = re.search(r"WHERE\s+(.*?)(?:\s+GROUP|\s+ORDER|\s+LIMIT|$)", sql)
         if where_match:
-            components['where'] = {where_match.group(1).strip()}
+            components["where"] = {where_match.group(1).strip()}
 
         # SQL keywords
-        keywords = ['SELECT', 'FROM', 'WHERE', 'JOIN', 'GROUP BY', 'ORDER BY',
-                   'HAVING', 'LIMIT', 'DISTINCT', 'COUNT', 'SUM', 'AVG', 'MAX', 'MIN']
-        components['keywords'] = {kw for kw in keywords if kw in sql}
+        keywords = [
+            "SELECT",
+            "FROM",
+            "WHERE",
+            "JOIN",
+            "GROUP BY",
+            "ORDER BY",
+            "HAVING",
+            "LIMIT",
+            "DISTINCT",
+            "COUNT",
+            "SUM",
+            "AVG",
+            "MAX",
+            "MIN",
+        ]
+        components["keywords"] = {kw for kw in keywords if kw in sql}
 
         return components
 
@@ -149,7 +171,7 @@ class SQLRewardCalculator:
         scores = []
 
         # Compare each component type
-        for comp_type in ['select', 'from', 'where', 'keywords']:
+        for comp_type in ["select", "from", "where", "keywords"]:
             pred_set = pred_components[comp_type]
             gold_set = gold_components[comp_type]
 
@@ -166,16 +188,18 @@ class SQLRewardCalculator:
         # Token-level similarity as fallback
         pred_tokens = set(pred_sql.upper().split())
         gold_tokens = set(gold_sql.upper().split())
-        token_similarity = len(pred_tokens & gold_tokens) / len(gold_tokens | pred_tokens) if gold_tokens else 0
+        token_similarity = (
+            len(pred_tokens & gold_tokens) / len(gold_tokens | pred_tokens)
+            if gold_tokens
+            else 0
+        )
         scores.append(token_similarity)
 
         return sum(scores) / len(scores) if scores else 0.0
 
-    def compute_reward(self,
-                      pred_sql: str,
-                      gold_sql: str,
-                      question: str,
-                      db_path: str) -> Dict[str, float]:
+    def compute_reward(
+        self, pred_sql: str, gold_sql: str, question: str, db_path: str
+    ) -> Dict[str, float]:
         """
         Compute total reward combining execution and partial rewards.
 
@@ -191,14 +215,22 @@ class SQLRewardCalculator:
         # Execution-based reward
         # Attempt to execute and capture errors for debugging
         try:
-            pred_success, pred_results, pred_error = self._execute_sql(pred_sql, db_path)
+            pred_success, pred_results, pred_error = self._execute_sql(
+                pred_sql, db_path
+            )
         except Exception as e:
-            pred_success, pred_results, pred_error = False, None, f"Execution exception: {e}"
+            pred_success, pred_results, pred_error = (
+                False,
+                None,
+                f"Execution exception: {e}",
+            )
 
         # If execution succeeded, compute normalized equality
         if pred_success:
             # Execute gold SQL
-            gold_success, gold_results, gold_error = self._execute_sql(gold_sql, db_path)
+            gold_success, gold_results, gold_error = self._execute_sql(
+                gold_sql, db_path
+            )
             if not gold_success:
                 exec_reward = 0.0
             else:
@@ -207,7 +239,9 @@ class SQLRewardCalculator:
                 exec_reward = 1.0 if pred_normalized == gold_normalized else 0.0
         else:
             exec_reward = 0.0
-            gold_success, gold_results, gold_error = self._execute_sql(gold_sql, db_path)
+            gold_success, gold_results, gold_error = self._execute_sql(
+                gold_sql, db_path
+            )
 
         # Partial rewards (if execution fails)
         if exec_reward == 0.0 and self.config.use_partial_rewards:
@@ -215,32 +249,34 @@ class SQLRewardCalculator:
         else:
             partial_reward = 0.0
 
-         # Combined reward
-         total_reward = (
-             self.config.execution_weight * exec_reward +
-             self.config.partial_weight * partial_reward
-         )
+        # Combined reward
+        total_reward = (
+            self.config.execution_weight * exec_reward
+            + self.config.partial_weight * partial_reward
+        )
 
         # Include debugging info about execution errors
         debug = {
-            'pred_success': pred_success if 'pred_success' in locals() else False,
-            'pred_error': pred_error if 'pred_error' in locals() else None,
-            'gold_success': gold_success if 'gold_success' in locals() else False,
-            'gold_error': gold_error if 'gold_error' in locals() else None
+            "pred_success": pred_success if "pred_success" in locals() else False,
+            "pred_error": pred_error if "pred_error" in locals() else None,
+            "gold_success": gold_success if "gold_success" in locals() else False,
+            "gold_error": gold_error if "gold_error" in locals() else None,
         }
 
         return {
-            'execution': exec_reward,
-            'partial': partial_reward,
-            'total': total_reward,
-            'debug': debug
+            "execution": exec_reward,
+            "partial": partial_reward,
+            "total": total_reward,
+            "debug": debug,
         }
 
-    def compute_batch_rewards(self,
-                            pred_sqls: List[str],
-                            gold_sqls: List[str],
-                            questions: List[str],
-                            db_paths: List[str]) -> List[float]:
+    def compute_batch_rewards(
+        self,
+        pred_sqls: List[str],
+        gold_sqls: List[str],
+        questions: List[str],
+        db_paths: List[str],
+    ) -> List[float]:
         """
         Compute rewards for a batch of predictions.
 
@@ -249,9 +285,11 @@ class SQLRewardCalculator:
         """
         rewards = []
 
-        for pred, gold, question, db_path in zip(pred_sqls, gold_sqls, questions, db_paths):
+        for pred, gold, question, db_path in zip(
+            pred_sqls, gold_sqls, questions, db_paths
+        ):
             reward_dict = self.compute_reward(pred, gold, question, db_path)
-            rewards.append(reward_dict['total'])
+            rewards.append(reward_dict["total"])
 
         return rewards
 
@@ -260,9 +298,7 @@ class SQLRewardCalculator:
 if __name__ == "__main__":
     # Example test
     config = RewardConfig(
-        execution_weight=1.0,
-        partial_weight=0.3,
-        use_partial_rewards=True
+        execution_weight=1.0, partial_weight=0.3, use_partial_rewards=True
     )
 
     # This would need an actual database
