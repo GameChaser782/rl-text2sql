@@ -81,6 +81,36 @@ class SQLRewardCalculator:
             normalized.add(normalized_row)
         return normalized
 
+    def _sanitize_sql(self, text: str) -> str:
+        """Sanitize model output to extract a runnable SQL statement.
+
+        Removes Markdown fences (```), inline backticks, and any surrounding explanation.
+        Returns the first SELECT ... [up to semicolon] if found, otherwise returns the original text.
+        """
+        if not text:
+            return text
+
+        # Remove Markdown code fences and inline backticks
+        sanitized = text.replace("```", " ")
+        sanitized = sanitized.replace("`", " ")
+
+        # If there is a SQL: marker, take what's after it
+        if "SQL:" in sanitized:
+            sanitized = sanitized.split("SQL:", 1)[1]
+
+        # Find first SELECT
+        up = sanitized.upper()
+        idx = up.find("SELECT")
+        if idx != -1:
+            candidate = sanitized[idx:]
+            # Trim at first semicolon if present
+            if ";" in candidate:
+                candidate = candidate.split(";", 1)[0]
+            return candidate.strip()
+
+        # Fallback: return sanitized trimmed
+        return sanitized.strip()
+
     def execution_accuracy(self, pred_sql: str, gold_sql: str, db_path: str) -> float:
         """
         Compute execution-based reward.
@@ -212,6 +242,10 @@ class SQLRewardCalculator:
         Returns:
             Dictionary with reward components and total
         """
+        # Sanitize predicted SQL (remove markdown fences, inline backticks, extra text)
+        pred_sql_raw = pred_sql
+        pred_sql = self._sanitize_sql(pred_sql_raw)
+
         # Execution-based reward
         # Attempt to execute and capture errors for debugging
         try:
@@ -261,6 +295,8 @@ class SQLRewardCalculator:
             "pred_error": pred_error if "pred_error" in locals() else None,
             "gold_success": gold_success if "gold_success" in locals() else False,
             "gold_error": gold_error if "gold_error" in locals() else None,
+            "pred_sql_raw": pred_sql_raw,
+            "pred_sql_sanitized": pred_sql,
         }
 
         return {
