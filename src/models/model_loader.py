@@ -1,12 +1,13 @@
-# Unsloth must be imported BEFORE transformers/peft for optimization patching
+# Unsloth MUST be imported FIRST before transformers or torch
 try:
-    from unsloth import FastLanguageModel, unsloth_inference_mode
+    from unsloth import FastLanguageModel
 
     HAS_UNSLOTH = True
 except ImportError as e:
     HAS_UNSLOTH = False
     print(f"WARNING: Unsloth import failed: {e}")
 
+# Now import everything else
 import os
 
 import torch
