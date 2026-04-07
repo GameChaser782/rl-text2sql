@@ -87,10 +87,14 @@ def main(args):
     # Initialize reward calculator
     print("\nInitializing reward calculator...")
     reward_config = RewardConfig(
+        reward_mode=config_dict.get("reward_mode", "execution_partial"),
         execution_weight=config_dict.get("execution_weight", 1.0),
         partial_weight=config_dict.get("partial_weight", 0.3),
         timeout_seconds=config_dict.get("timeout_seconds", 5),
         use_partial_rewards=config_dict.get("use_partial_rewards", True),
+        format_reward=config_dict.get("format_reward", 1.0),
+        executable_reward=config_dict.get("executable_reward", 2.0),
+        result_reward=config_dict.get("result_reward", 3.0),
     )
 
     # Note: For Spider, each example has its own database
@@ -105,11 +109,14 @@ def main(args):
     grpo_config = GRPOConfig(
         num_samples_per_prompt=config_dict.get("num_samples", 4),
         temperature=config_dict.get("temperature", 0.7),
+        top_p=config_dict.get("top_p", 0.9),
         learning_rate=float(config_dict.get("learning_rate", 1e-5)),
         num_epochs=config_dict.get("num_epochs", 3),
         batch_size=config_dict.get("batch_size", 1),
         gradient_accumulation_steps=config_dict.get("gradient_accumulation_steps", 8),
         kl_coef=config_dict.get("kl_coef", 0.1),
+        clip_range=config_dict.get("clip_range", 0.2),
+        advantage_normalization=config_dict.get("advantage_normalization", True),
         max_grad_norm=config_dict.get("max_grad_norm", 1.0),
         max_new_tokens=config_dict.get("max_new_tokens", 512),
         num_gpus=config_dict.get(

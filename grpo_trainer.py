@@ -20,6 +20,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def masked_mean(values: torch.Tensor, mask: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """Mean over valid response tokens only."""
+    mask = mask.to(dtype=values.dtype, device=values.device)
+    return (values * mask).sum() / mask.sum().clamp_min(eps)
+
+
 @dataclass
 class GRPOConfig:
     """Configuration for GRPO training."""
@@ -228,6 +234,67 @@ SQL:"""
 
         return advantages
 
+    @staticmethod
+    def compute_policy_loss(
+        old_log_probs: torch.Tensor,
+        log_probs: torch.Tensor,
+        advantages: torch.Tensor,
+        response_mask: torch.Tensor,
+        clip_range: float,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Compute the PPO clipped policy loss used by SQL-R1/VERL.
+
+        All tensors are response-token aligned with shape [batch, response_length].
+        """
+        log_ratio = log_probs - old_log_probs
+        ratio = torch.exp(log_ratio)
+        ppo_kl = masked_mean(-log_ratio, response_mask)
+
+        pg_losses = -advantages * ratio
+        pg_losses_clipped = -advantages * torch.clamp(
+            ratio, 1.0 - clip_range, 1.0 + clip_range
+        )
+        pg_loss = masked_mean(torch.max(pg_losses, pg_losses_clipped), response_mask)
+        pg_clipfrac = masked_mean(
+            (pg_losses_clipped > pg_losses).float(), response_mask
+        )
+
+        return pg_loss, pg_clipfrac, ppo_kl
+
+    @staticmethod
+    def low_variance_kl(policy_log_probs: torch.Tensor, ref_log_probs: torch.Tensor) -> torch.Tensor:
+        """Low-variance KL estimator used in VERL."""
+        log_ratio = ref_log_probs - policy_log_probs
+        return torch.exp(log_ratio) - log_ratio - 1
+
+    def _response_log_probs(
+        self, model: AutoModelForCausalLM, prompt: str, response: str
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return selected-token log-probs and a valid-token mask for one response."""
+        full_text = prompt + response
+        inputs = self.tokenizer(
+            full_text, return_tensors="pt", padding=True, truncation=True
+        ).to(model.device)
+        prompt_length = self.tokenizer(prompt, return_tensors="pt").input_ids.shape[1]
+
+        outputs = model(**inputs)
+        logits = outputs.logits[:, prompt_length - 1 : -1, :]
+        labels = inputs.input_ids[:, prompt_length:]
+
+        if logits.shape[1] != labels.shape[1]:
+            seq_len = min(logits.shape[1], labels.shape[1])
+            logits = logits[:, :seq_len, :]
+            labels = labels[:, :seq_len]
+
+        log_probs = F.log_softmax(logits, dim=-1)
+        token_log_probs = torch.gather(
+            log_probs, dim=2, index=labels.unsqueeze(2)
+        ).squeeze(2)
+        mask = torch.ones_like(token_log_probs, dtype=torch.float32)
+
+        return token_log_probs, mask
+
     def compute_kl_divergence(self, prompt: str, response: str) -> torch.Tensor:
         """
         Compute KL divergence between policy and reference model.
@@ -282,6 +349,7 @@ SQL:"""
         prompts: List[str],
         responses: List[List[str]],
         advantages: List[List[float]],
+        old_log_probs: List[List[torch.Tensor]],
     ) -> Dict[str, float]:
         """
         Perform a policy gradient update step.
@@ -299,39 +367,50 @@ SQL:"""
         total_loss = 0.0
         total_pg_loss = 0.0
         total_kl = 0.0
+        total_clipfrac = 0.0
+        total_ppo_kl = 0.0
         num_updates = 0
 
-        for prompt, response_group, advantage_group in zip(
-            prompts, responses, advantages
+        self.optimizer.zero_grad()
+
+        for group_index, (prompt, response_group, advantage_group) in enumerate(
+            zip(prompts, responses, advantages)
         ):
-            for response, advantage in zip(response_group, advantage_group):
-                # Tokenize
-                full_text = prompt + response
-                inputs = self.tokenizer(
-                    full_text, return_tensors="pt", padding=True, truncation=True
-                ).to(self.policy_model.device)
+            for response_index, (response, advantage) in enumerate(
+                zip(response_group, advantage_group)
+            ):
+                token_log_probs, response_mask = self._response_log_probs(
+                    self.policy_model, prompt, response
+                )
+                old_token_log_probs = old_log_probs[group_index][response_index].to(
+                    token_log_probs.device
+                )
 
-                prompt_length = self.tokenizer(
-                    prompt, return_tensors="pt"
-                ).input_ids.shape[1]
+                seq_len = min(token_log_probs.shape[1], old_token_log_probs.numel())
+                token_log_probs = token_log_probs[:, :seq_len]
+                response_mask = response_mask[:, :seq_len]
+                old_token_log_probs = old_token_log_probs[:seq_len].unsqueeze(0)
+                advantage_tensor = torch.full_like(token_log_probs, float(advantage))
 
-                # Forward pass
-                outputs = self.policy_model(**inputs, labels=inputs.input_ids)
+                pg_loss, pg_clipfrac, ppo_kl = self.compute_policy_loss(
+                    old_token_log_probs,
+                    token_log_probs,
+                    advantage_tensor,
+                    response_mask,
+                    self.config.clip_range,
+                )
 
-                # Get log probs for generated tokens
-                logits = outputs.logits[:, prompt_length - 1 : -1, :]
-                labels = inputs.input_ids[:, prompt_length:]
-
-                log_probs = F.log_softmax(logits, dim=-1)
-                token_log_probs = torch.gather(
-                    log_probs, dim=2, index=labels.unsqueeze(2)
-                ).squeeze(2)
-
-                # Policy gradient loss: -advantage * log_prob
-                pg_loss = -advantage * token_log_probs.mean()
-
-                # KL penalty
-                kl = self.compute_kl_divergence(prompt, response)
+                try:
+                    with torch.no_grad():
+                        ref_log_probs, _ = self._response_log_probs(
+                            self.reference_model, prompt, response
+                        )
+                    ref_log_probs = ref_log_probs.to(token_log_probs.device)[:, :seq_len]
+                    token_kl = self.low_variance_kl(token_log_probs, ref_log_probs)
+                    kl = masked_mean(token_kl, response_mask)
+                except Exception as e:
+                    logger.warning(f"Error computing reference token KL: {e}. Using zero KL.")
+                    kl = torch.tensor(0.0, device=self.policy_model.device)
 
                 # Total loss
                 loss = pg_loss + self.config.kl_coef * kl
@@ -343,6 +422,8 @@ SQL:"""
                 total_loss += loss.item()
                 total_pg_loss += pg_loss.item()
                 total_kl += kl.item()
+                total_clipfrac += pg_clipfrac.item()
+                total_ppo_kl += ppo_kl.item()
                 num_updates += 1
 
                 # Update weights
@@ -354,10 +435,20 @@ SQL:"""
                     self.optimizer.zero_grad()
                     self.global_step += 1
 
+        if num_updates % self.config.gradient_accumulation_steps != 0:
+            torch.nn.utils.clip_grad_norm_(
+                self.policy_model.parameters(), self.config.max_grad_norm
+            )
+            self.optimizer.step()
+            self.optimizer.zero_grad()
+            self.global_step += 1
+
         return {
             "loss": total_loss / num_updates,
             "pg_loss": total_pg_loss / num_updates,
             "kl": total_kl / num_updates,
+            "clipfrac": total_clipfrac / num_updates,
+            "ppo_kl": total_ppo_kl / num_updates,
         }
 
     def train_epoch(self, dataloader: DataLoader) -> Dict[str, float]:
@@ -385,7 +476,7 @@ SQL:"""
             prompts = [self._create_prompt(q, s) for q, s in zip(questions, schemas)]
 
             # Sample responses
-            responses, _ = self.sample_responses(prompts)
+            responses, old_log_probs = self.sample_responses(prompts)
 
             # Compute rewards
             rewards = []
@@ -416,7 +507,9 @@ SQL:"""
             advantages = self.compute_advantages(rewards)
 
             # Policy gradient step
-            step_metrics = self.policy_gradient_step(prompts, responses, advantages)
+            step_metrics = self.policy_gradient_step(
+                prompts, responses, advantages, old_log_probs
+            )
 
             # Update metrics
             for key in epoch_metrics:

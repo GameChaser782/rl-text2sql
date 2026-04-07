@@ -26,10 +26,14 @@ top_p: 0.9
 max_new_tokens: 512
 
 # Reward Configuration
+reward_mode: "sql_r1"  # Use "execution_partial" for the previous execution + partial reward
 execution_weight: 1.0
 partial_weight: 0.3
 timeout_seconds: 5
 use_partial_rewards: true
+format_reward: 1.0
+executable_reward: 2.0
+result_reward: 3.0
 
 # Training Configuration
 num_epochs: 2

@@ -5,6 +5,7 @@ Implements execution-based and partial rewards.
 
 import difflib
 import re
+import signal
 import sqlite3
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -16,10 +17,14 @@ import timeout_decorator
 class RewardConfig:
     """Configuration for reward calculation."""
 
+    reward_mode: str = "execution_partial"
     execution_weight: float = 1.0
     partial_weight: float = 0.3
     timeout_seconds: int = 5
     use_partial_rewards: bool = True
+    format_reward: float = 1.0
+    executable_reward: float = 2.0
+    result_reward: float = 3.0
 
 
 class SQLRewardCalculator:
@@ -47,7 +52,6 @@ class SQLRewardCalculator:
         """
         try:
 
-            @timeout_decorator.timeout(self.config.timeout_seconds)
             def _run_query():
                 conn = sqlite3.connect(db_path)
                 cursor = conn.cursor()
@@ -56,7 +60,13 @@ class SQLRewardCalculator:
                 conn.close()
                 return results
 
-            results = _run_query()
+            if hasattr(signal, "SIGALRM"):
+                results = timeout_decorator.timeout(self.config.timeout_seconds)(
+                    _run_query
+                )()
+            else:
+                # timeout_decorator's default signal backend is not available on Windows.
+                results = _run_query()
             return True, results, None
 
         except timeout_decorator.TimeoutError:
@@ -110,6 +120,19 @@ class SQLRewardCalculator:
 
         # Fallback: return sanitized trimmed
         return sanitized.strip()
+
+    def _has_sql_format(self, sql: str) -> bool:
+        """Return whether text starts with a supported SQL statement."""
+        if not sql:
+            return False
+
+        return bool(
+            re.match(
+                r"^\s*(SELECT|WITH|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER)\b",
+                sql,
+                flags=re.IGNORECASE,
+            )
+        )
 
     def execution_accuracy(self, pred_sql: str, gold_sql: str, db_path: str) -> float:
         """
@@ -245,6 +268,7 @@ class SQLRewardCalculator:
         # Sanitize predicted SQL (remove markdown fences, inline backticks, extra text)
         pred_sql_raw = pred_sql
         pred_sql = self._sanitize_sql(pred_sql_raw)
+        format_ok = self._has_sql_format(pred_sql)
 
         # Execution-based reward
         # Attempt to execute and capture errors for debugging
@@ -283,11 +307,29 @@ class SQLRewardCalculator:
         else:
             partial_reward = 0.0
 
-        # Combined reward
-        total_reward = (
-            self.config.execution_weight * exec_reward
-            + self.config.partial_weight * partial_reward
+        format_score = self.config.format_reward if format_ok else -abs(
+            self.config.format_reward
         )
+        executable_score = self.config.executable_reward if pred_success else -abs(
+            self.config.executable_reward
+        )
+        result_score = self.config.result_reward if exec_reward == 1.0 else -abs(
+            self.config.result_reward
+        )
+
+        if self.config.reward_mode == "sql_r1":
+            # SQL-R1-style reward: format + executability + result match.
+            total_reward = format_score
+            if format_ok:
+                total_reward += executable_score
+                if pred_success:
+                    total_reward += result_score
+        else:
+            # Backwards-compatible reward used by the original repo implementation.
+            total_reward = (
+                self.config.execution_weight * exec_reward
+                + self.config.partial_weight * partial_reward
+            )
 
         # Include debugging info about execution errors
         debug = {
@@ -297,11 +339,17 @@ class SQLRewardCalculator:
             "gold_error": gold_error if "gold_error" in locals() else None,
             "pred_sql_raw": pred_sql_raw,
             "pred_sql_sanitized": pred_sql,
+            "format_ok": format_ok,
         }
 
         return {
+            "format": 1.0 if format_ok else 0.0,
+            "executable": 1.0 if pred_success else 0.0,
             "execution": exec_reward,
             "partial": partial_reward,
+            "format_score": format_score,
+            "executable_score": executable_score,
+            "result_score": result_score,
             "total": total_reward,
             "debug": debug,
         }
