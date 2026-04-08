@@ -3,7 +3,6 @@ GRPO (Group Relative Policy Optimization) trainer for Text-to-SQL.
 Based on SQL-R1 paper: https://arxiv.org/abs/2504.08600
 """
 
-import copy
 import logging
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -11,6 +10,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
+from accelerate import Accelerator
 from reward import SQLRewardCalculator
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -65,9 +65,11 @@ class GRPOTrainer:
     def __init__(
         self,
         model: AutoModelForCausalLM,
+        reference_model: AutoModelForCausalLM,
         tokenizer: AutoTokenizer,
         reward_calculator: SQLRewardCalculator,
         config: GRPOConfig,
+        accelerator: Accelerator,
         device: str = "cuda",
         num_gpus: int = 1,
         use_unsloth: bool = False,
@@ -88,26 +90,22 @@ class GRPOTrainer:
         self.device = device
         self.num_gpus = num_gpus
         self.use_unsloth = use_unsloth
+        self.accelerator = accelerator
 
         # Policy model
         self.policy_model = model
-        if num_gpus == 1:
-            self.policy_model = model.to(device)
 
         self.tokenizer = tokenizer
         self.reward_calculator = reward_calculator
 
         # Create reference model (frozen copy of initial policy)
-        # For memory efficiency on Kaggle, create a lightweight reference
-        logger.info("Creating reference model for KL divergence computation...")
-        try:
-            self.reference_model = copy.deepcopy(model)
-        except RuntimeError as e:
-            logger.warning(
-                f"Failed to deepcopy model due to: {e}. Using same model for reference (not recommended)."
-            )
-            self.reference_model = model
+        logger.info("Initializing reference model for KL divergence computation...")
+        self.reference_model = reference_model
 
+        if hasattr(self.reference_model, "eval"):
+            self.reference_model.eval()
+        if not getattr(self.reference_model, "hf_device_map", None):
+            self.reference_model = self.reference_model.to(self.accelerator.device)
         self.reference_model.eval()
         for param in self.reference_model.parameters():
             param.requires_grad = False
@@ -120,6 +118,15 @@ class GRPOTrainer:
         # Training state
         self.global_step = 0
         self.epoch = 0
+
+    def _unwrap_policy_model(self):
+        return self.accelerator.unwrap_model(self.policy_model)
+
+    @staticmethod
+    def _module_device(module: AutoModelForCausalLM) -> torch.device:
+        if hasattr(module, "device"):
+            return module.device
+        return next(module.parameters()).device
 
     def _create_prompt(self, question: str, schema: Optional[str] = None) -> str:
         """Create prompt for the model."""
@@ -154,6 +161,8 @@ SQL:"""
         num_samples = num_samples or self.config.num_samples_per_prompt
 
         self.policy_model.eval()
+        generation_model = self._unwrap_policy_model()
+        generation_device = self._module_device(generation_model)
 
         all_responses = []
         all_log_probs = []
@@ -165,13 +174,13 @@ SQL:"""
             # Tokenize prompt
             inputs = self.tokenizer(
                 prompt, return_tensors="pt", padding=True, truncation=True
-            ).to(self.policy_model.device)
+            ).to(generation_device)
 
             prompt_length = inputs.input_ids.shape[1]
 
             # Sample multiple responses
             for _ in range(num_samples):
-                outputs = self.policy_model.generate(
+                outputs = generation_model.generate(
                     **inputs,
                     max_new_tokens=self.config.max_new_tokens,
                     temperature=self.config.temperature,
@@ -275,7 +284,7 @@ SQL:"""
         full_text = prompt + response
         inputs = self.tokenizer(
             full_text, return_tensors="pt", padding=True, truncation=True
-        ).to(model.device)
+        ).to(self._module_device(model))
         prompt_length = self.tokenizer(prompt, return_tensors="pt").input_ids.shape[1]
 
         outputs = model(**inputs)
@@ -304,7 +313,7 @@ SQL:"""
         full_text = prompt + response
         inputs = self.tokenizer(
             full_text, return_tensors="pt", padding=True, truncation=True
-        ).to(self.policy_model.device)
+        ).to(self._module_device(self._unwrap_policy_model()))
 
         prompt_length = self.tokenizer(prompt, return_tensors="pt").input_ids.shape[1]
 
@@ -315,13 +324,14 @@ SQL:"""
                 policy_logits = policy_outputs.logits[:, prompt_length - 1 : -1, :]
             except Exception as e:
                 logger.warning(f"Error getting policy logits: {e}. Using dummy KL.")
-                return torch.tensor(0.0, device=self.policy_model.device)
+                return torch.tensor(0.0, device=self.accelerator.device)
 
             # Reference logits
             try:
                 # Move inputs to reference model device if different
                 ref_inputs = {
-                    k: v.to(self.reference_model.device) for k, v in inputs.items()
+                    k: v.to(self._module_device(self.reference_model))
+                    for k, v in inputs.items()
                 }
                 ref_outputs = self.reference_model(**ref_inputs)
                 ref_logits = ref_outputs.logits[:, prompt_length - 1 : -1, :].to(
@@ -329,7 +339,7 @@ SQL:"""
                 )
             except Exception as e:
                 logger.warning(f"Error getting reference logits: {e}. Using zero KL.")
-                return torch.tensor(0.0, device=self.policy_model.device)
+                return torch.tensor(0.0, device=self.accelerator.device)
 
         # KL divergence
         try:
@@ -340,7 +350,7 @@ SQL:"""
             )
         except Exception as e:
             logger.warning(f"Error computing KL divergence: {e}. Returning zero.")
-            kl = torch.tensor(0.0, device=self.policy_model.device)
+            kl = torch.tensor(0.0, device=self.accelerator.device)
 
         return kl
 
@@ -410,14 +420,14 @@ SQL:"""
                     kl = masked_mean(token_kl, response_mask)
                 except Exception as e:
                     logger.warning(f"Error computing reference token KL: {e}. Using zero KL.")
-                    kl = torch.tensor(0.0, device=self.policy_model.device)
+                    kl = torch.tensor(0.0, device=self.accelerator.device)
 
                 # Total loss
                 loss = pg_loss + self.config.kl_coef * kl
 
                 # Backward pass
                 loss = loss / self.config.gradient_accumulation_steps
-                loss.backward()
+                self.accelerator.backward(loss)
 
                 total_loss += loss.item()
                 total_pg_loss += pg_loss.item()
@@ -428,7 +438,7 @@ SQL:"""
 
                 # Update weights
                 if num_updates % self.config.gradient_accumulation_steps == 0:
-                    torch.nn.utils.clip_grad_norm_(
+                    self.accelerator.clip_grad_norm_(
                         self.policy_model.parameters(), self.config.max_grad_norm
                     )
                     self.optimizer.step()
@@ -436,7 +446,7 @@ SQL:"""
                     self.global_step += 1
 
         if num_updates % self.config.gradient_accumulation_steps != 0:
-            torch.nn.utils.clip_grad_norm_(
+            self.accelerator.clip_grad_norm_(
                 self.policy_model.parameters(), self.config.max_grad_norm
             )
             self.optimizer.step()
@@ -463,7 +473,11 @@ SQL:"""
 
         num_batches = 0
 
-        progress_bar = tqdm(dataloader, desc=f"Epoch {self.epoch}")
+        progress_bar = tqdm(
+            dataloader,
+            desc=f"Epoch {self.epoch}",
+            disable=not self.accelerator.is_local_main_process,
+        )
 
         for batch in progress_bar:
             # Extract batch data
@@ -531,10 +545,23 @@ SQL:"""
                 )
 
         # Average metrics
-        for key in epoch_metrics:
-            epoch_metrics[key] /= num_batches
+        local_metrics = {
+            key: torch.tensor(value, device=self.accelerator.device, dtype=torch.float32)
+            for key, value in epoch_metrics.items()
+        }
+        local_num_batches = torch.tensor(
+            num_batches, device=self.accelerator.device, dtype=torch.float32
+        )
 
-        return epoch_metrics
+        gathered_num_batches = self.accelerator.gather(local_num_batches.unsqueeze(0))
+        total_batches = gathered_num_batches.sum().item()
+
+        aggregated_metrics = {}
+        for key, value in local_metrics.items():
+            gathered_value = self.accelerator.gather(value.unsqueeze(0))
+            aggregated_metrics[key] = gathered_value.sum().item() / max(total_batches, 1.0)
+
+        return aggregated_metrics
 
     def _extract_sql(self, response: str) -> str:
         """Extract SQL query from model response."""
@@ -564,9 +591,11 @@ SQL:"""
             # Train epoch
             metrics = self.train_epoch(train_dataloader)
 
-            logger.info(f"Epoch {epoch} metrics: {metrics}")
+            if self.accelerator.is_main_process:
+                logger.info(f"Epoch {epoch} metrics: {metrics}")
 
-        logger.info("Training complete!")
+        if self.accelerator.is_main_process:
+            logger.info("Training complete!")
 
 
 # Example usage

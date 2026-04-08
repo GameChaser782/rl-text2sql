@@ -1,18 +1,18 @@
 # Configuration for RL Text-to-SQL Training
 # Based on SQL-R1 GRPO approach
-# Optimized for Kaggle Notebooks with Unsloth support
+# Optimized for Kaggle Notebooks and Accelerate multi-GPU launches
 
 # Model Configuration
 model_name: "Qwen/Qwen2.5-Coder-3B-Instruct"
 use_qlora: true
-use_unsloth: false  # Set to true for Kaggle (Linux only, faster training, less VRAM)
+use_unsloth: false  # Keep false on Kaggle T4 unless you have verified your stack supports it
 use_vllm_inference: false
 
 # Maximum sequence length (important for unsloth)
 max_seq_length: 2048
 
 # Hardware Configuration
-num_gpus: 1  # Set to 1 for Kaggle (single GPU)
+num_gpus: 1  # The launcher can override this automatically for 1 or more GPUs
 
 # Data Configuration
 train_data: "data/spider/train_spider.json"
@@ -60,8 +60,6 @@ lora_target_modules:
 
 # Output
 output_dir: "outputs/rl-text2sql"
-seed: 42
-output_dir: "outputs/rl-text2sql"
 log_interval: 10
 eval_interval: 100
 save_steps: 500
@@ -71,7 +69,8 @@ seed: 42
 device: "cuda"
 
 # Notes:
-# - For 24GB GPU, keep batch_size=1 with gradient accumulation
+# - Launch with `accelerate` for multi-GPU training
+# - For 16-24GB GPUs, keep batch_size=1 with gradient accumulation
 # - Reduce num_samples to 2-3 if OOM
 # - Reduce max_new_tokens to 128 if OOM
 # - Use gradient_checkpointing (enabled by default in code)

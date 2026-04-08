@@ -4,12 +4,14 @@ Integrates model loading, dataset preparation, and GRPO training.
 """
 
 import argparse
+import copy
 import os
 import sys
 from pathlib import Path
 
 import torch
 import yaml
+from accelerate import Accelerator
 from grpo_trainer import GRPOConfig, GRPOTrainer
 from reward import RewardConfig, SQLRewardCalculator
 from src.data.spider_dataset import SpiderDataset, collate_fn
@@ -19,6 +21,7 @@ from torch.utils.data import DataLoader
 
 def main(args):
     """Main training function."""
+    accelerator = Accelerator()
 
     # Load configuration
     if args.config:
@@ -49,28 +52,55 @@ def main(args):
         else:
             config_dict["output_dir"] = "outputs/rl-text2sql"
 
-    print("=" * 80)
-    print("RL Text-to-SQL Training")
-    print("=" * 80)
-    print(f"Configuration: {config_dict}")
-    print("=" * 80)
+    world_size = accelerator.num_processes
+    config_dict["num_gpus"] = max(
+        int(config_dict.get("num_gpus", world_size if torch.cuda.is_available() else 1)),
+        world_size,
+    )
+
+    if accelerator.is_main_process:
+        print("=" * 80)
+        print("RL Text-to-SQL Training")
+        print("=" * 80)
+        print(f"Configuration: {config_dict}")
+        print(f"Accelerate processes: {world_size}")
+        print("=" * 80)
 
     # Set random seeds
     torch.manual_seed(config_dict.get("seed", 42))
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(config_dict.get("seed", 42))
+
+    local_device_map = None
+    if torch.cuda.is_available() and not config_dict.get("use_unsloth", False):
+        local_device_map = {"": accelerator.local_process_index}
 
     # Load model and tokenizer
-    print("\nLoading model...")
-    # For unsloth, ensure we pass the max_seq_length configuration
+    if accelerator.is_main_process:
+        print("\nLoading model...")
     model, tokenizer = load_model(
         config_dict["model_name"],
         use_qlora=config_dict.get("use_qlora", True),
         use_unsloth=config_dict.get("use_unsloth", False),
         num_gpus=config_dict.get("num_gpus", 1),
         max_seq_length=config_dict.get("max_seq_length", 2048),
+        device_map=local_device_map,
+        torch_dtype=(
+            torch.bfloat16
+            if torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 8
+            else torch.float16
+        ),
     )
+    try:
+        reference_model = copy.deepcopy(model)
+    except RuntimeError as e:
+        raise RuntimeError(
+            f"Unable to create reference model copy required for GRPO KL regularization: {e}"
+        ) from e
 
     # Load dataset
-    print("\nLoading dataset...")
+    if accelerator.is_main_process:
+        print("\nLoading dataset...")
     train_dataset = SpiderDataset(
         data_path=config_dict["train_data"], db_root=config_dict["db_root"]
     )
@@ -82,10 +112,12 @@ def main(args):
         collate_fn=collate_fn,
     )
 
-    print(f"Train dataset size: {len(train_dataset)}")
+    if accelerator.is_main_process:
+        print(f"Train dataset size: {len(train_dataset)}")
 
     # Initialize reward calculator
-    print("\nInitializing reward calculator...")
+    if accelerator.is_main_process:
+        print("\nInitializing reward calculator...")
     reward_config = RewardConfig(
         reward_mode=config_dict.get("reward_mode", "execution_partial"),
         execution_weight=config_dict.get("execution_weight", 1.0),
@@ -105,7 +137,8 @@ def main(args):
     )
 
     # Initialize GRPO trainer
-    print("\nInitializing GRPO trainer...")
+    if accelerator.is_main_process:
+        print("\nInitializing GRPO trainer...")
     grpo_config = GRPOConfig(
         num_samples_per_prompt=config_dict.get("num_samples", 4),
         temperature=config_dict.get("temperature", 0.7),
@@ -124,29 +157,37 @@ def main(args):
         ),  # Pass num_gpus to config if needed, or directly to Trainer
     )
 
+    model, train_dataloader = accelerator.prepare(model, train_dataloader)
+
     trainer = GRPOTrainer(
         model=model,
+        reference_model=reference_model,
         tokenizer=tokenizer,
         reward_calculator=reward_calculator,
         config=grpo_config,
+        accelerator=accelerator,
         device="cuda" if torch.cuda.is_available() else "cpu",
         num_gpus=config_dict.get("num_gpus", 1),
         use_unsloth=config_dict.get("use_unsloth", False),
     )
 
     # Train
-    print("\nStarting training...")
-    print("=" * 80)
+    if accelerator.is_main_process:
+        print("\nStarting training...")
+        print("=" * 80)
     trainer.train(train_dataloader)
+    accelerator.wait_for_everyone()
 
     # Save model
-    if config_dict.get("output_dir"):
+    if config_dict.get("output_dir") and accelerator.is_main_process:
         print(f"\nSaving model to {config_dict['output_dir']}...")
         os.makedirs(config_dict["output_dir"], exist_ok=True)
 
+        unwrapped_model = accelerator.unwrap_model(model)
+
         # Save LoRA adapters if using PEFT
-        if hasattr(model, "save_pretrained"):
-            model.save_pretrained(config_dict["output_dir"])
+        if hasattr(unwrapped_model, "save_pretrained"):
+            unwrapped_model.save_pretrained(config_dict["output_dir"])
 
         tokenizer.save_pretrained(config_dict["output_dir"])
 
@@ -158,7 +199,8 @@ def main(args):
 
         print("Model saved successfully!")
 
-    print("\nTraining complete!")
+    if accelerator.is_main_process:
+        print("\nTraining complete!")
 
 
 if __name__ == "__main__":
