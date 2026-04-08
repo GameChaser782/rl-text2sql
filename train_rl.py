@@ -35,6 +35,16 @@ def main(args):
         if value is not None and key != "config":
             config_dict[key] = value
 
+    missing_required = [
+        key for key in ("train_data", "db_root") if not config_dict.get(key)
+    ]
+    if missing_required:
+        raise ValueError(
+            "Missing required configuration values: "
+            + ", ".join(missing_required)
+            + ". Provide them via --config or CLI arguments."
+        )
+
     # If running on Kaggle, default the output directory to a persistent path
     # so that repo clones/updates won't overwrite model artifacts.
     try:
@@ -228,10 +238,10 @@ if __name__ == "__main__":
 
     # Data
     parser.add_argument(
-        "--train_data", type=str, required=True, help="Path to training data JSON"
+        "--train_data", type=str, required=False, help="Path to training data JSON"
     )
     parser.add_argument(
-        "--db_root", type=str, required=True, help="Root directory of databases"
+        "--db_root", type=str, required=False, help="Root directory of databases"
     )
 
     # Training
