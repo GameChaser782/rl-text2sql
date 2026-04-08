@@ -2,7 +2,7 @@
 set -euo pipefail
 
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen2.5-Coder-3B-Instruct}"
-TRAIN_DATA="${TRAIN_DATA:-/kaggle/working/spider_data/train_200.json}"
+TRAIN_DATA="${TRAIN_DATA:-/kaggle/working/spider_data/sft_train_400.json}"
 DB_ROOT="${DB_ROOT:-/kaggle/working/spider_data/database}"
 OUTPUT_DIR="${OUTPUT_DIR:-/kaggle/working/rl-text2sql-sft}"
 MAX_LENGTH="${MAX_LENGTH:-1024}"
@@ -14,6 +14,7 @@ SAVE_STEPS="${SAVE_STEPS:-50}"
 SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-2}"
 DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-2}"
 NUM_GPUS="${NUM_GPUS:-1}"
+LOGGING_DIR="${LOGGING_DIR:-${OUTPUT_DIR}/logs}"
 
 ACCELERATE_CMD=(accelerate launch --num_machines 1 --mixed_precision fp16 --dynamo_backend no)
 if [ "${NUM_GPUS}" -gt 1 ]; then
@@ -33,4 +34,5 @@ fi
   --save_steps "${SAVE_STEPS}" \
   --save_total_limit "${SAVE_TOTAL_LIMIT}" \
   --dataloader_num_workers "${DATALOADER_NUM_WORKERS}" \
+  --logging_dir "${LOGGING_DIR}" \
   --use_qlora

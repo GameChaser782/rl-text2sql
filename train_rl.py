@@ -115,6 +115,11 @@ def main(args):
     train_dataset = SpiderDataset(
         data_path=config_dict["train_data"], db_root=config_dict["db_root"]
     )
+    dev_dataset = None
+    if config_dict.get("dev_data"):
+        dev_dataset = SpiderDataset(
+            data_path=config_dict["dev_data"], db_root=config_dict["db_root"]
+        )
 
     train_dataloader = DataLoader(
         train_dataset,
@@ -183,6 +188,8 @@ def main(args):
         save_steps=int(config_dict.get("save_steps", 500)),
         save_total_limit=int(config_dict.get("save_total_limit", 2)),
         output_dir=config_dict.get("output_dir"),
+        tensorboard_log_dir=config_dict.get("tensorboard_log_dir"),
+        eval_subset_size=int(config_dict.get("eval_subset_size", 50)),
     )
 
     model, train_dataloader = accelerator.prepare(model, train_dataloader)
@@ -203,7 +210,7 @@ def main(args):
     if accelerator.is_main_process:
         print("\nStarting training...")
         print("=" * 80)
-    trainer.train(train_dataloader)
+    trainer.train(train_dataloader, dev_dataset=dev_dataset)
     accelerator.wait_for_everyone()
 
     # Save model
@@ -265,6 +272,9 @@ if __name__ == "__main__":
         "--train_data", type=str, required=False, help="Path to training data JSON"
     )
     parser.add_argument(
+        "--dev_data", type=str, required=False, help="Path to dev data JSON"
+    )
+    parser.add_argument(
         "--db_root", type=str, required=False, help="Root directory of databases"
     )
 
@@ -275,6 +285,7 @@ if __name__ == "__main__":
     parser.add_argument("--dataloader_num_workers", type=int, default=None)
     parser.add_argument("--dataloader_prefetch_factor", type=int, default=None)
     parser.add_argument("--reward_workers", type=int, default=None)
+    parser.add_argument("--eval_subset_size", type=int, default=None)
     parser.add_argument(
         "--num_samples",
         type=int,
@@ -286,6 +297,12 @@ if __name__ == "__main__":
     # Output
     parser.add_argument(
         "--output_dir", type=str, default=None, help="Directory to save model"
+    )
+    parser.add_argument(
+        "--tensorboard_log_dir",
+        type=str,
+        default=None,
+        help="TensorBoard log directory",
     )
     parser.add_argument("--seed", type=int, default=None)
 

@@ -6,6 +6,7 @@ Based on SQL-R1 paper: https://arxiv.org/abs/2504.08600
 import logging
 import os
 import shutil
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -16,6 +17,7 @@ import torch.nn.functional as F
 from accelerate import Accelerator
 from reward import SQLRewardCalculator
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -64,6 +66,8 @@ class GRPOConfig:
     save_steps: int = 500
     save_total_limit: int = 2
     output_dir: Optional[str] = None
+    tensorboard_log_dir: Optional[str] = None
+    eval_subset_size: int = 50
 
 
 class GRPOTrainer:
@@ -104,6 +108,7 @@ class GRPOTrainer:
 
         self.tokenizer = tokenizer
         self.reward_calculator = reward_calculator
+        self.schema_cache: Dict[str, Optional[str]] = {}
 
         # Create reference model (frozen copy of initial policy)
         logger.info("Initializing reference model for KL divergence computation...")
@@ -125,6 +130,11 @@ class GRPOTrainer:
         # Training state
         self.global_step = 0
         self.epoch = 0
+        self.best_dev_execution_accuracy = float("-inf")
+        self.tb_writer = None
+        if self.accelerator.is_main_process and self.config.tensorboard_log_dir:
+            os.makedirs(self.config.tensorboard_log_dir, exist_ok=True)
+            self.tb_writer = SummaryWriter(log_dir=self.config.tensorboard_log_dir)
 
     def _save_checkpoint(self):
         if (
@@ -162,6 +172,19 @@ class GRPOTrainer:
     def _unwrap_policy_model(self):
         return self.accelerator.unwrap_model(self.policy_model)
 
+    def _save_best_checkpoint(self):
+        if not self.accelerator.is_main_process or not self.config.output_dir:
+            return
+
+        best_dir = os.path.join(self.config.output_dir, "best-checkpoint")
+        os.makedirs(best_dir, exist_ok=True)
+
+        unwrapped_model = self.accelerator.unwrap_model(self.policy_model)
+        if hasattr(unwrapped_model, "save_pretrained"):
+            unwrapped_model.save_pretrained(best_dir)
+        if hasattr(self.tokenizer, "save_pretrained"):
+            self.tokenizer.save_pretrained(best_dir)
+
     @staticmethod
     def _module_device(module: AutoModelForCausalLM) -> torch.device:
         if hasattr(module, "device"):
@@ -188,6 +211,31 @@ SQL:"""
             )
 
         return prompt
+
+    def _get_db_schema(self, db_path: str) -> Optional[str]:
+        if db_path in self.schema_cache:
+            return self.schema_cache[db_path]
+
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = [r[0] for r in cur.fetchall()]
+            parts = []
+            for table in tables:
+                try:
+                    cur.execute(f"PRAGMA table_info('{table}')")
+                    cols = [r[1] for r in cur.fetchall()]
+                    parts.append(f"{table}({', '.join(cols)})")
+                except Exception:
+                    parts.append(table)
+            conn.close()
+            schema = "; ".join(parts) if parts else None
+        except Exception:
+            schema = None
+
+        self.schema_cache[db_path] = schema
+        return schema
 
     @torch.no_grad()
     def sample_responses(
@@ -258,6 +306,26 @@ SQL:"""
             all_log_probs.append(prompt_log_probs)
 
         return all_responses, all_log_probs
+
+    @torch.no_grad()
+    def generate_greedy_response(self, prompt: str) -> str:
+        generation_model = self._unwrap_policy_model()
+        generation_device = self._module_device(generation_model)
+        generation_model.eval()
+
+        inputs = self.tokenizer(
+            prompt, return_tensors="pt", padding=True, truncation=True
+        ).to(generation_device)
+        prompt_length = inputs.input_ids.shape[1]
+        outputs = generation_model.generate(
+            **inputs,
+            max_new_tokens=self.config.max_new_tokens,
+            do_sample=False,
+            temperature=0.0,
+            pad_token_id=self.tokenizer.pad_token_id,
+        )
+        response_ids = outputs[0][prompt_length:]
+        return self.tokenizer.decode(response_ids, skip_special_tokens=True)
 
     def compute_advantages(self, rewards: List[List[float]]) -> List[List[float]]:
         """
@@ -543,7 +611,10 @@ SQL:"""
             schemas = batch.get("schema", [None] * len(questions))
 
             # Create prompts
-            prompts = [self._create_prompt(q, s) for q, s in zip(questions, schemas)]
+            prompts = [
+                self._create_prompt(q, s or self._get_db_schema(db_path))
+                for q, s, db_path in zip(questions, schemas, db_paths)
+            ]
 
             # Sample responses
             responses, old_log_probs = self.sample_responses(prompts)
@@ -581,13 +652,24 @@ SQL:"""
 
             # Update progress bar
             if num_batches % self.config.log_interval == 0:
-                progress_bar.set_postfix(
-                    {
-                        "loss": epoch_metrics["loss"] / num_batches,
-                        "reward": epoch_metrics["mean_reward"] / num_batches,
-                        "exec_acc": epoch_metrics["execution_accuracy"] / num_batches,
-                    }
-                )
+                log_metrics = {
+                    "loss": epoch_metrics["loss"] / num_batches,
+                    "reward": epoch_metrics["mean_reward"] / num_batches,
+                    "exec_acc": epoch_metrics["execution_accuracy"] / num_batches,
+                }
+                progress_bar.set_postfix(log_metrics)
+                if self.tb_writer is not None:
+                    self.tb_writer.add_scalar(
+                        "train/loss", log_metrics["loss"], self.global_step
+                    )
+                    self.tb_writer.add_scalar(
+                        "train/reward", log_metrics["reward"], self.global_step
+                    )
+                    self.tb_writer.add_scalar(
+                        "train/execution_accuracy",
+                        log_metrics["exec_acc"],
+                        self.global_step,
+                    )
 
         # Average metrics
         local_metrics = {
@@ -607,6 +689,34 @@ SQL:"""
             aggregated_metrics[key] = gathered_value.sum().item() / max(total_batches, 1.0)
 
         return aggregated_metrics
+
+    def evaluate_dataset(
+        self, dataset, max_examples: Optional[int] = None
+    ) -> Dict[str, float]:
+        total = min(len(dataset), max_examples or len(dataset))
+        execution_correct = 0
+        exact_match = 0
+
+        for idx in range(total):
+            item = dataset[idx]
+            prompt = self._create_prompt(
+                item["question"],
+                item.get("schema") or self._get_db_schema(item["db_path"]),
+            )
+            pred_sql = self._extract_sql(self.generate_greedy_response(prompt))
+            reward_dict = self.reward_calculator.compute_reward(
+                pred_sql, item["sql"], item["question"], item["db_path"]
+            )
+            if reward_dict["execution"] == 1.0:
+                execution_correct += 1
+            if pred_sql.strip().upper() == item["sql"].strip().upper():
+                exact_match += 1
+
+        return {
+            "execution_accuracy": execution_correct / max(total, 1),
+            "exact_match": exact_match / max(total, 1),
+            "total": total,
+        }
 
     def _extract_sql(self, response: str) -> str:
         """Extract SQL query from model response."""
@@ -672,7 +782,7 @@ SQL:"""
         group_exec_accs = [reward_dict["execution"] for reward_dict in reward_dicts]
         return group_rewards, group_exec_accs
 
-    def train(self, train_dataloader: DataLoader):
+    def train(self, train_dataloader: DataLoader, dev_dataset=None):
         """Full training loop."""
         logger.info("Starting GRPO training...")
         logger.info(f"Config: {self.config}")
@@ -685,8 +795,31 @@ SQL:"""
 
             if self.accelerator.is_main_process:
                 logger.info(f"Epoch {epoch} metrics: {metrics}")
+                if self.tb_writer is not None:
+                    for key, value in metrics.items():
+                        self.tb_writer.add_scalar(f"train_epoch/{key}", value, epoch)
+
+            self.accelerator.wait_for_everyone()
+            if dev_dataset is not None and self.accelerator.is_main_process:
+                dev_metrics = self.evaluate_dataset(
+                    dev_dataset, max_examples=self.config.eval_subset_size
+                )
+                logger.info(f"Epoch {epoch} dev metrics: {dev_metrics}")
+                if self.tb_writer is not None:
+                    for key, value in dev_metrics.items():
+                        self.tb_writer.add_scalar(f"dev/{key}", value, epoch)
+
+                if dev_metrics["execution_accuracy"] > self.best_dev_execution_accuracy:
+                    self.best_dev_execution_accuracy = dev_metrics["execution_accuracy"]
+                    self._save_best_checkpoint()
+                    logger.info(
+                        "Saved new best checkpoint with dev execution accuracy %.4f",
+                        self.best_dev_execution_accuracy,
+                    )
 
         if self.accelerator.is_main_process:
+            if self.tb_writer is not None:
+                self.tb_writer.close()
             logger.info("Training complete!")
 
 

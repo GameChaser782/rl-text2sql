@@ -126,6 +126,9 @@ def main(args):
     print("Text-to-SQL SFT")
     print("=" * 80)
 
+    if not args.logging_dir:
+        args.logging_dir = os.path.join(args.output_dir, "logs")
+
     model, tokenizer = load_model(
         args.model_name,
         use_qlora=args.use_qlora,
@@ -159,7 +162,8 @@ def main(args):
         fp16=torch.cuda.is_available(),
         bf16=torch.cuda.is_available()
         and torch.cuda.get_device_capability(0)[0] >= 8,
-        report_to="none",
+        report_to="tensorboard",
+        logging_dir=args.logging_dir,
         remove_unused_columns=False,
         dataloader_num_workers=args.dataloader_num_workers,
         dataloader_pin_memory=torch.cuda.is_available(),
@@ -196,6 +200,7 @@ if __name__ == "__main__":
     parser.add_argument("--save_steps", type=int, default=50)
     parser.add_argument("--save_total_limit", type=int, default=2)
     parser.add_argument("--dataloader_num_workers", type=int, default=2)
+    parser.add_argument("--logging_dir", type=str, default=None)
     parser.add_argument("--use_qlora", action="store_true", default=True)
 
     args = parser.parse_args()
