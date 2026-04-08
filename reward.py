@@ -7,6 +7,7 @@ import difflib
 import re
 import signal
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -360,6 +361,7 @@ class SQLRewardCalculator:
         gold_sqls: List[str],
         questions: List[str],
         db_paths: List[str],
+        num_workers: int = 1,
     ) -> List[float]:
         """
         Compute rewards for a batch of predictions.
@@ -367,15 +369,22 @@ class SQLRewardCalculator:
         Returns:
             List of total rewards
         """
-        rewards = []
+        items = list(zip(pred_sqls, gold_sqls, questions, db_paths))
 
-        for pred, gold, question, db_path in zip(
-            pred_sqls, gold_sqls, questions, db_paths
-        ):
+        if num_workers <= 1 or len(items) <= 1:
+            rewards = []
+            for pred, gold, question, db_path in items:
+                reward_dict = self.compute_reward(pred, gold, question, db_path)
+                rewards.append(reward_dict["total"])
+            return rewards
+
+        def _compute(item: Tuple[str, str, str, str]) -> float:
+            pred, gold, question, db_path = item
             reward_dict = self.compute_reward(pred, gold, question, db_path)
-            rewards.append(reward_dict["total"])
+            return reward_dict["total"]
 
-        return rewards
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            return list(executor.map(_compute, items))
 
 
 # Example usage and testing

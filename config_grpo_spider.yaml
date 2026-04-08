@@ -40,6 +40,9 @@ num_epochs: 2
 batch_size: 1  # Keep at 1 for 24GB GPU or Kaggle
 gradient_accumulation_steps: 8  # Effective batch size = 8
 learning_rate: 0.00001
+dataloader_num_workers: 2
+dataloader_prefetch_factor: 2
+reward_workers: 2
 max_grad_norm: 1.0
 warmup_steps: 100
 

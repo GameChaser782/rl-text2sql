@@ -120,6 +120,14 @@ def main(args):
         batch_size=config_dict.get("batch_size", 1),
         shuffle=True,
         collate_fn=collate_fn,
+        num_workers=int(config_dict.get("dataloader_num_workers", 0)),
+        pin_memory=bool(torch.cuda.is_available()),
+        persistent_workers=bool(config_dict.get("dataloader_num_workers", 0) > 0),
+        prefetch_factor=(
+            int(config_dict.get("dataloader_prefetch_factor", 2))
+            if int(config_dict.get("dataloader_num_workers", 0)) > 0
+            else None
+        ),
     )
 
     if accelerator.is_main_process:
@@ -165,6 +173,12 @@ def main(args):
         num_gpus=config_dict.get(
             "num_gpus", 1
         ),  # Pass num_gpus to config if needed, or directly to Trainer
+        reward_workers=int(
+            config_dict.get(
+                "reward_workers",
+                min(max(config_dict.get("num_samples", 4), 1), max(os.cpu_count() or 1, 1)),
+            )
+        ),
     )
 
     model, train_dataloader = accelerator.prepare(model, train_dataloader)
@@ -248,6 +262,9 @@ if __name__ == "__main__":
     parser.add_argument("--num_epochs", type=int, default=None)
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--learning_rate", type=float, default=None)
+    parser.add_argument("--dataloader_num_workers", type=int, default=None)
+    parser.add_argument("--dataloader_prefetch_factor", type=int, default=None)
+    parser.add_argument("--reward_workers", type=int, default=None)
     parser.add_argument(
         "--num_samples",
         type=int,

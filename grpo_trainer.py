@@ -4,6 +4,8 @@ Based on SQL-R1 paper: https://arxiv.org/abs/2504.08600
 """
 
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -57,6 +59,7 @@ class GRPOConfig:
 
     # Hardware
     num_gpus: int = 1
+    reward_workers: int = 1
 
 
 class GRPOTrainer:
@@ -499,20 +502,9 @@ SQL:"""
             for response_group, gold_sql, db_path in zip(
                 responses, gold_sqls, db_paths
             ):
-                group_rewards = []
-                group_exec_accs = []
-
-                for response in response_group:
-                    # Extract SQL from response
-                    pred_sql = self._extract_sql(response)
-
-                    # Compute reward
-                    reward_dict = self.reward_calculator.compute_reward(
-                        pred_sql, gold_sql, "", db_path
-                    )
-
-                    group_rewards.append(reward_dict["total"])
-                    group_exec_accs.append(reward_dict["execution"])
+                group_rewards, group_exec_accs = self._compute_group_rewards(
+                    response_group, gold_sql, db_path
+                )
 
                 rewards.append(group_rewards)
                 exec_accs.append(np.mean(group_exec_accs))
@@ -579,6 +571,31 @@ SQL:"""
             return sql.strip()
 
         return response
+
+    def _compute_group_rewards(
+        self, response_group: List[str], gold_sql: str, db_path: str
+    ) -> Tuple[List[float], List[float]]:
+        pred_sqls = [self._extract_sql(response) for response in response_group]
+        max_workers = max(self.config.reward_workers, 1)
+        max_workers = min(max_workers, len(pred_sqls), max(os.cpu_count() or 1, 1))
+
+        if max_workers <= 1:
+            reward_dicts = [
+                self.reward_calculator.compute_reward(pred_sql, gold_sql, "", db_path)
+                for pred_sql in pred_sqls
+            ]
+        else:
+            def _compute(pred_sql: str) -> Dict[str, float]:
+                return self.reward_calculator.compute_reward(
+                    pred_sql, gold_sql, "", db_path
+                )
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                reward_dicts = list(executor.map(_compute, pred_sqls))
+
+        group_rewards = [reward_dict["total"] for reward_dict in reward_dicts]
+        group_exec_accs = [reward_dict["execution"] for reward_dict in reward_dicts]
+        return group_rewards, group_exec_accs
 
     def train(self, train_dataloader: DataLoader):
         """Full training loop."""
