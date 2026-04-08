@@ -66,6 +66,7 @@ output_dir: "outputs/rl-text2sql"
 log_interval: 10
 eval_interval: 100
 save_steps: 500
+save_total_limit: 2
 
 # System
 seed: 42

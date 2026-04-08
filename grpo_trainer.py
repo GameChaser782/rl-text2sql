@@ -5,6 +5,7 @@ Based on SQL-R1 paper: https://arxiv.org/abs/2504.08600
 
 import logging
 import os
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -60,6 +61,9 @@ class GRPOConfig:
     # Hardware
     num_gpus: int = 1
     reward_workers: int = 1
+    save_steps: int = 500
+    save_total_limit: int = 2
+    output_dir: Optional[str] = None
 
 
 class GRPOTrainer:
@@ -122,6 +126,39 @@ class GRPOTrainer:
         self.global_step = 0
         self.epoch = 0
 
+    def _save_checkpoint(self):
+        if (
+            not self.accelerator.is_main_process
+            or not self.config.output_dir
+            or self.global_step <= 0
+        ):
+            return
+
+        checkpoint_dir = os.path.join(
+            self.config.output_dir, f"checkpoint-{self.global_step}"
+        )
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+        unwrapped_model = self.accelerator.unwrap_model(self.policy_model)
+        if hasattr(unwrapped_model, "save_pretrained"):
+            unwrapped_model.save_pretrained(checkpoint_dir)
+        if hasattr(self.tokenizer, "save_pretrained"):
+            self.tokenizer.save_pretrained(checkpoint_dir)
+
+        if self.config.save_total_limit and self.config.save_total_limit > 0:
+            checkpoints = sorted(
+                [
+                    os.path.join(self.config.output_dir, name)
+                    for name in os.listdir(self.config.output_dir)
+                    if name.startswith("checkpoint-")
+                    and os.path.isdir(os.path.join(self.config.output_dir, name))
+                ],
+                key=lambda path: int(os.path.basename(path).split("-")[-1]),
+            )
+            while len(checkpoints) > self.config.save_total_limit:
+                old_checkpoint = checkpoints.pop(0)
+                shutil.rmtree(old_checkpoint, ignore_errors=True)
+
     def _unwrap_policy_model(self):
         return self.accelerator.unwrap_model(self.policy_model)
 
@@ -139,10 +176,16 @@ class GRPOTrainer:
 
 Question: {question}
 
-Generate a SQL query to answer this question:
+Return only one executable SQL query that answers the question.
+Do not include any explanation, markdown, comments, or extra text.
 SQL:"""
         else:
-            prompt = f"Question: {question}\nSQL:"
+            prompt = (
+                f"Question: {question}\n"
+                "Return only one executable SQL query.\n"
+                "Do not include any explanation, markdown, comments, or extra text.\n"
+                "SQL:"
+            )
 
         return prompt
 
@@ -447,6 +490,11 @@ SQL:"""
                     self.optimizer.step()
                     self.optimizer.zero_grad()
                     self.global_step += 1
+                    if (
+                        self.config.save_steps > 0
+                        and self.global_step % self.config.save_steps == 0
+                    ):
+                        self._save_checkpoint()
 
         if num_updates % self.config.gradient_accumulation_steps != 0:
             self.accelerator.clip_grad_norm_(
@@ -455,6 +503,11 @@ SQL:"""
             self.optimizer.step()
             self.optimizer.zero_grad()
             self.global_step += 1
+            if (
+                self.config.save_steps > 0
+                and self.global_step % self.config.save_steps == 0
+            ):
+                self._save_checkpoint()
 
         return {
             "loss": total_loss / num_updates,
@@ -557,20 +610,42 @@ SQL:"""
 
     def _extract_sql(self, response: str) -> str:
         """Extract SQL query from model response."""
-        # Simple extraction: take everything after "SQL:" or first SELECT
-        response = response.strip()
+        response = response.strip().replace("```", " ").replace("`", " ")
+        if "SQL:" in response:
+            response = response.split("SQL:", 1)[1].strip()
 
-        # Look for SELECT keyword
-        select_idx = response.upper().find("SELECT")
-        if select_idx != -1:
-            # Find end of SQL (semicolon or end of string)
-            sql = response[select_idx:]
-            semicolon_idx = sql.find(";")
-            if semicolon_idx != -1:
-                sql = sql[:semicolon_idx]
-            return sql.strip()
+        upper_response = response.upper()
+        sql_starts = ["SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER"]
+        start_idx = -1
+        for keyword in sql_starts:
+            idx = upper_response.find(keyword)
+            if idx != -1 and (start_idx == -1 or idx < start_idx):
+                start_idx = idx
 
-        return response
+        sql = response[start_idx:] if start_idx != -1 else response
+
+        stop_markers = [
+            "\n\n",
+            "\nExplanation:",
+            "\nEXPLANATION:",
+            "\nNote:",
+            "\nNOTE:",
+            "\nThis query",
+            "\nThe SQL query",
+        ]
+        for marker in stop_markers:
+            marker_idx = sql.find(marker)
+            if marker_idx != -1:
+                sql = sql[:marker_idx]
+
+        first_line = sql.splitlines()[0].strip() if sql.splitlines() else sql.strip()
+        sql = first_line or sql.strip()
+
+        semicolon_idx = sql.find(";")
+        if semicolon_idx != -1:
+            sql = sql[:semicolon_idx]
+
+        return sql.strip()
 
     def _compute_group_rewards(
         self, response_group: List[str], gold_sql: str, db_path: str

@@ -100,6 +100,7 @@ def main(args):
             if torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 8
             else torch.float16
         ),
+        adapter_path=config_dict.get("adapter_path"),
     )
     try:
         reference_model = copy.deepcopy(model)
@@ -179,6 +180,9 @@ def main(args):
                 min(max(config_dict.get("num_samples", 4), 1), max(os.cpu_count() or 1, 1)),
             )
         ),
+        save_steps=int(config_dict.get("save_steps", 500)),
+        save_total_limit=int(config_dict.get("save_total_limit", 2)),
+        output_dir=config_dict.get("output_dir"),
     )
 
     model, train_dataloader = accelerator.prepare(model, train_dataloader)
@@ -248,6 +252,12 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--num_gpus", type=int, default=1, help="Number of GPUs to use (1 or 2)"
+    )
+    parser.add_argument(
+        "--adapter_path",
+        type=str,
+        default=None,
+        help="Optional LoRA adapter path to continue training from",
     )
 
     # Data

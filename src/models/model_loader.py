@@ -1,15 +1,10 @@
-# Unsloth MUST be imported FIRST before transformers or torch
-try:
-    from unsloth import FastLanguageModel
-
-    HAS_UNSLOTH = True
-except ImportError as e:
-    HAS_UNSLOTH = False
-    print(f"WARNING: Unsloth import failed: {e}")
-
-# Now import everything else
 import torch
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from peft import (
+    LoraConfig,
+    PeftModel,
+    get_peft_model,
+    prepare_model_for_kbit_training,
+)
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 
@@ -21,6 +16,7 @@ def load_model(
     max_seq_length: int = 2048,
     device_map=None,
     torch_dtype=None,
+    adapter_path: str = None,
 ):
     """
     Load model and tokenizer with specified configuration.
@@ -44,14 +40,16 @@ def load_model(
 
     print(
         f"Loading model {model_name} with use_unsloth={use_unsloth}, use_qlora={use_qlora}, "
-        f"num_gpus={num_gpus}, device_map={device_map}, torch_dtype={torch_dtype}"
+        f"num_gpus={num_gpus}, device_map={device_map}, torch_dtype={torch_dtype}, adapter_path={adapter_path}"
     )
 
     if use_unsloth:
-        if not HAS_UNSLOTH:
+        try:
+            from unsloth import FastLanguageModel
+        except ImportError as e:
             raise ImportError(
                 "Unsloth is not installed. Please install it with: pip install unsloth[kaggle] or set use_unsloth=False."
-            )
+            ) from e
 
         # Load model with Unsloth optimization
         # Unsloth patches the model for faster training with less VRAM
@@ -101,18 +99,25 @@ def load_model(
             # Prepare for k-bit training
             model = prepare_model_for_kbit_training(model)
 
-            # LoRA configuration
-            lora_config = LoraConfig(
-                r=16,
-                lora_alpha=32,
-                target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
-                lora_dropout=0.05,
-                bias="none",
-                task_type="CAUSAL_LM",
-            )
+            if adapter_path:
+                model = PeftModel.from_pretrained(
+                    model,
+                    adapter_path,
+                    is_trainable=True,
+                )
+            else:
+                # LoRA configuration
+                lora_config = LoraConfig(
+                    r=16,
+                    lora_alpha=32,
+                    target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+                    lora_dropout=0.05,
+                    bias="none",
+                    task_type="CAUSAL_LM",
+                )
 
-            # Add LoRA adapters
-            model = get_peft_model(model, lora_config)
+                # Add LoRA adapters
+                model = get_peft_model(model, lora_config)
 
             print(f"LoRA trainable parameters: {model.print_trainable_parameters()}")
 

@@ -35,10 +35,16 @@ class Text2SQLEvaluator:
 
 Question: {question}
 
-Generate a SQL query to answer this question:
+Return only one executable SQL query that answers the question.
+Do not include any explanation, markdown, comments, or extra text.
 SQL:"""
         else:
-            prompt = f"Question: {question}\nSQL:"
+            prompt = (
+                f"Question: {question}\n"
+                "Return only one executable SQL query.\n"
+                "Do not include any explanation, markdown, comments, or extra text.\n"
+                "SQL:"
+            )
         return prompt
 
     def _get_db_schema(self, db_path: str) -> str:
@@ -92,22 +98,36 @@ SQL:"""
         return sql
 
     def extract_sql(self, text: str) -> str:
-        text = text.strip()
-        # Heuristic: Find first SELECT or 'SQL:' marker
-        # First try to split by 'SQL:' token
+        text = text.strip().replace("```", " ").replace("`", " ")
         if "SQL:" in text:
-            after = text.split("SQL:", 1)[1]
-            select_idx = after.upper().find("SELECT")
-            if select_idx != -1:
-                sql = after[select_idx:]
-            else:
-                sql = after
-        else:
-            select_idx = text.upper().find("SELECT")
-            if select_idx != -1:
-                sql = text[select_idx:]
-            else:
-                sql = text
+            text = text.split("SQL:", 1)[1].strip()
+
+        upper_text = text.upper()
+        sql_starts = ["SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER"]
+        start_idx = -1
+        for keyword in sql_starts:
+            idx = upper_text.find(keyword)
+            if idx != -1 and (start_idx == -1 or idx < start_idx):
+                start_idx = idx
+
+        sql = text[start_idx:] if start_idx != -1 else text
+
+        stop_markers = [
+            "\n\n",
+            "\nExplanation:",
+            "\nEXPLANATION:",
+            "\nNote:",
+            "\nNOTE:",
+            "\nThis query",
+            "\nThe SQL query",
+        ]
+        for marker in stop_markers:
+            marker_idx = sql.find(marker)
+            if marker_idx != -1:
+                sql = sql[:marker_idx]
+
+        first_line = sql.splitlines()[0].strip() if sql.splitlines() else sql.strip()
+        sql = first_line or sql.strip()
 
         semicolon_idx = sql.find(";")
         if semicolon_idx != -1:
@@ -115,20 +135,10 @@ SQL:"""
         return sql.strip()
 
     def _sanitize_sql(self, text: str) -> str:
-        """Remove markdown fences/backticks and extract first SELECT statement."""
+        """Normalize model output into a single SQL statement."""
         if not text:
             return text
-        s = text.replace("```", " ").replace("`", " ")
-        if "SQL:" in s:
-            s = s.split("SQL:", 1)[1]
-        up = s.upper()
-        idx = up.find("SELECT")
-        if idx != -1:
-            candidate = s[idx:]
-            if ";" in candidate:
-                candidate = candidate.split(";", 1)[0]
-            return candidate.strip()
-        return s.strip()
+        return self.extract_sql(text)
 
     def evaluate(
         self, test_data: List[Dict], db_root: str, output_file: str = None

@@ -109,12 +109,30 @@ class SQLRewardCalculator:
         if "SQL:" in sanitized:
             sanitized = sanitized.split("SQL:", 1)[1]
 
-        # Find first SELECT
-        up = sanitized.upper()
-        idx = up.find("SELECT")
-        if idx != -1:
-            candidate = sanitized[idx:]
-            # Trim at first semicolon if present
+        upper_sanitized = sanitized.upper()
+        sql_starts = ["SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER"]
+        start_idx = -1
+        for keyword in sql_starts:
+            idx = upper_sanitized.find(keyword)
+            if idx != -1 and (start_idx == -1 or idx < start_idx):
+                start_idx = idx
+        if start_idx != -1:
+            candidate = sanitized[start_idx:]
+            stop_markers = [
+                "\n\n",
+                "\nExplanation:",
+                "\nEXPLANATION:",
+                "\nNote:",
+                "\nNOTE:",
+                "\nThis query",
+                "\nThe SQL query",
+            ]
+            for marker in stop_markers:
+                marker_idx = candidate.find(marker)
+                if marker_idx != -1:
+                    candidate = candidate[:marker_idx]
+            first_line = candidate.splitlines()[0].strip() if candidate.splitlines() else candidate.strip()
+            candidate = first_line or candidate.strip()
             if ";" in candidate:
                 candidate = candidate.split(";", 1)[0]
             return candidate.strip()
